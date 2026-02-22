@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>RW - Material OCR Batch System</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- เพิ่มไลบรารี Panzoom สำหรับจัดการระบบสัมผัสและใช้นิ้วซูมบนมือถือ -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/panzoom/9.4.0/panzoom.min.js"></script>
     <style>
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         .animate-fade-in { animation: fadeIn 0.3s ease-out; }
@@ -14,12 +16,6 @@
         /* ซ่อน Scrollbar แต่ยังเลื่อนได้สำหรับโหมดปกติ */
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-        
-        /* สไตล์สำหรับ Scrollbar ตอนซูมรูป */
-        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: #1f2937; }
-
         .zoom-overlay { transition: all 0.2s ease-in-out; }
     </style>
 </head>
@@ -104,8 +100,11 @@
         // โครงสร้างข้อมูลคิวรูปภาพ
         let imageQueue = [];
         let isResultMode = false;
-        const MAX_CONCURRENT = 3; // ส่งทีละ 3 รูป
-        const MAX_RETRIES = 3;    // ลองใหม่ 3 ครั้ง
+        const MAX_CONCURRENT = 3; 
+        const MAX_RETRIES = 3;    
+
+        // 🌟 เพิ่ม Object สำหรับเก็บสถานะ Panzoom
+        const panzoomInstances = {};
 
         // 1. จัดการเมื่อผู้ใช้เลือกไฟล์
         function handleFiles(event) {
@@ -114,14 +113,12 @@
 
             document.getElementById('empty-state').classList.add('hidden');
             
-            // วนลูปอ่านและย่อรูปทีละไฟล์
             Array.from(files).forEach(file => {
                 const reader = new FileReader();
                 reader.onload = (e) => resizeAndQueueImage(e.target.result);
                 reader.readAsDataURL(file);
             });
 
-            // รีเซ็ต input เผื่อเลือกไฟล์เดิม
             event.target.value = '';
         }
 
@@ -267,41 +264,48 @@
             document.getElementById('btn-back').classList.add('hidden');
         }
 
-        // ฟังก์ชันเปิด/ปิดรูปขยาย
+        // 🌟 อัปเกรดฟังก์ชันเปิด/ปิดรูปขยาย พร้อมใช้งาน Panzoom
         window.togglePreviewImage = function(id) {
             const previewContainer = document.getElementById('preview_' + id);
             if (previewContainer) {
                 previewContainer.classList.toggle('hidden');
-                // หากซ่อนรูปอยู่ ให้รีเซ็ตการซูมกลับไปขนาดปกติ
-                if (previewContainer.classList.contains('hidden')) {
-                    const img = document.getElementById('img_zoom_' + id);
-                    if (img && !img.classList.contains('w-full')) {
-                        toggleZoomById('img_zoom_' + id);
+                
+                const imgElement = document.getElementById('img_zoom_' + id);
+
+                if (!previewContainer.classList.contains('hidden')) {
+                    // สร้าง Panzoom เมื่อรูปถูกเปิด (ถ้ายังไม่มี)
+                    if (!panzoomInstances[id] && typeof panzoom !== 'undefined') {
+                        panzoomInstances[id] = panzoom(imgElement, {
+                            maxZoom: 5,
+                            minZoom: 1,
+                            bounds: true,
+                            boundsPadding: 0
+                        });
+                    }
+                } else {
+                    // รีเซ็ตตำแหน่งเวลาปิดรูป
+                    if (panzoomInstances[id]) {
+                        panzoomInstances[id].smoothZoomAbs(0, 0, 1);
+                        panzoomInstances[id].moveTo(0, 0);
                     }
                 }
             }
         }
 
-        // 🌟 ฟังก์ชันใหม่: จัดการการซูมรูปภาพ
-        window.toggleZoomById = function(imgId) {
-            const img = document.getElementById(imgId);
-            if (!img) return;
-            
-            if (img.classList.contains('w-full')) {
-                // ซูมเข้า (Zoom In)
-                img.classList.remove('w-full', 'max-h-64', 'object-contain', 'cursor-zoom-in');
-                img.classList.add('w-[250%]', 'max-w-[250%]', 'h-auto', 'cursor-zoom-out');
-                
-                // เลื่อนหน้าจอให้ไปอยู่จุดกึ่งกลางของรูปที่ถูกซูม
-                setTimeout(() => {
-                    const container = img.parentElement;
-                    container.scrollLeft = (container.scrollWidth - container.clientWidth) / 2;
-                    container.scrollTop = (container.scrollHeight - container.clientHeight) / 2;
-                }, 50);
-            } else {
-                // ย่อกลับ (Zoom Out)
-                img.classList.add('w-full', 'max-h-64', 'object-contain', 'cursor-zoom-in');
-                img.classList.remove('w-[250%]', 'max-w-[250%]', 'h-auto', 'cursor-zoom-out');
+        // 🌟 อัปเกรดฟังก์ชันซูมโดยใช้ปุ่ม (ทำงานร่วมกับ Panzoom)
+        window.toggleZoomById = function(id) {
+            if (panzoomInstances[id]) {
+                const transform = panzoomInstances[id].getTransform();
+                if (transform.scale > 1.2) {
+                    // หากซูมอยู่ ให้ย่อกลับ 100%
+                    panzoomInstances[id].smoothZoomAbs(0, 0, 1);
+                    panzoomInstances[id].moveTo(0, 0);
+                } else {
+                    // หากไม่ได้ซูม ให้ซูมเข้าตรงกลางรูปภาพที่ 2.5 เท่า
+                    const img = document.getElementById('img_zoom_' + id);
+                    const rect = img.getBoundingClientRect();
+                    panzoomInstances[id].smoothZoomAbs(rect.width / 2, rect.height / 2, 2.5);
+                }
             }
         }
 
@@ -343,17 +347,24 @@
                         <button class="text-red-400 hover:text-red-600 text-xl font-bold px-2" onclick="removeItem('${item.id}')">&times;</button>
                         </div>
                         
-                        <!-- 🌟 พื้นที่รูปภาพขยาย พร้อมระบบซูม -->
+                        <!-- 🌟 พื้นที่รูปภาพขยาย พร้อมระบบซูมอิสระ (Panzoom) -->
                         <div id="preview_${item.id}" class="hidden mb-4 rounded-lg overflow-hidden border border-gray-300 relative bg-gray-900 animate-fade-in shadow-inner">
                             <div class="flex justify-between items-center bg-gray-800 text-white px-3 py-1.5 text-xs sticky top-0 z-10 shadow-md">
                                 <span class="font-bold flex items-center gap-1">👁️ เทียบข้อมูลต้นฉบับ</span>
                                 <div class="flex gap-2">
-                                    <button onclick="toggleZoomById('img_zoom_${item.id}')" class="text-blue-200 hover:text-white px-2 py-1 rounded bg-blue-900 border border-blue-700 flex items-center gap-1"><span class="text-[10px]">🔍</span> ซูมรูป</button>
+                                    <button onclick="toggleZoomById('${item.id}')" class="text-blue-200 hover:text-white px-2 py-1 rounded bg-blue-900 border border-blue-700 flex items-center gap-1"><span class="text-[10px]">🔍</span> ซูม 2.5x</button>
                                     <button onclick="togglePreviewImage('${item.id}')" class="text-gray-300 hover:text-white px-2 py-1 rounded bg-gray-700 border border-gray-600">ซ่อน ✕</button>
                                 </div>
                             </div>
-                            <div class="overflow-auto max-h-[50vh] w-full bg-black text-center custom-scrollbar">
-                                <img id="img_zoom_${item.id}" src="${item.base64}" class="inline-block w-full max-h-64 object-contain cursor-zoom-in transition-all duration-300 origin-center" onclick="toggleZoomById('img_zoom_${item.id}')" title="แตะเพื่อซูม">
+                            <!-- โซนสำหรับรูปภาพ ตัด overflow ออกเพื่อให้เลื่อนอิสระ -->
+                            <div class="w-full bg-black text-center h-[300px] overflow-hidden relative touch-none">
+                                <img id="img_zoom_${item.id}" src="${item.base64}" class="w-full h-full object-contain cursor-move pointer-events-auto">
+                                <!-- คำแนะนำ -->
+                                <div class="absolute bottom-2 left-0 right-0 pointer-events-none flex justify-center">
+                                    <span class="bg-black bg-opacity-70 text-white text-[10px] px-3 py-1.5 rounded-full flex items-center gap-2">
+                                        <span>👆 ใช้นิ้วกางเพื่อซูม</span> <span>🖐️ ลากเพื่อเลื่อน</span>
+                                    </span>
+                                </div>
                             </div>
                         </div>
 
@@ -377,7 +388,7 @@
                             </div>
                         </div>
                         <div class="text-[10px] text-gray-400 text-center mt-3 flex items-center justify-center gap-1">
-                            <span>💡 แตะตัวเลขเพื่อแก้ไข</span> หรือ <button class="text-blue-500 underline font-bold" onclick="togglePreviewImage('${item.id}')">ซูมรูปเทียบข้อมูล</button>
+                            <span>💡 แตะตัวเลขเพื่อแก้ไข</span> หรือ <button class="text-blue-500 underline font-bold" onclick="togglePreviewImage('${item.id}')">ดู/ซูมรูปเทียบข้อมูล</button>
                         </div>
                     `;
                 } 
@@ -424,9 +435,13 @@
             }
         }
 
-        // ลบรูปที่ไม่ต้องการ
+        // ลบรูปที่ไม่ต้องการ พร้อมคืนหน่วยความจำ (Panzoom)
         function removeItem(id) {
             imageQueue = imageQueue.filter(i => i.id !== id);
+            if (panzoomInstances[id]) {
+                panzoomInstances[id].dispose();
+                delete panzoomInstances[id];
+            }
             updateUploadUI();
             if (imageQueue.length === 0) switchToUploadMode();
             else renderResultCards();
@@ -470,7 +485,13 @@
                     
                     imageQueue = imageQueue.filter(item => {
                         const isSuccess = successIds.includes(item.id);
-                        if (isSuccess) return false; 
+                        if (isSuccess) {
+                            if (panzoomInstances[item.id]) {
+                                panzoomInstances[item.id].dispose();
+                                delete panzoomInstances[item.id];
+                            }
+                            return false; 
+                        }
                         
                         const dupInfo = duplicateItems.find(d => d.id === item.id);
                         if (dupInfo) {
