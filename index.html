@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>RW - Material OCR Batch System</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- 🌟 เปลี่ยนมาใช้ไลบรารี Panzoom เวอร์ชันที่รองรับมือถือ (Pinch-to-zoom) ได้ดีที่สุด -->
     <script src="https://cdn.jsdelivr.net/npm/@panzoom/panzoom@4.5.0/dist/panzoom.min.js"></script>
     <style>
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
@@ -13,21 +12,19 @@
         [contenteditable="true"]:hover { background-color: rgba(255,255,255,0.8); cursor: text; border-radius: 4px; box-shadow: 0 0 0 1px #cbd5e1; }
         [contenteditable="true"]:focus { outline: 2px solid #3b82f6; background-color: #fff; border-radius: 4px; padding: 0 4px; }
         .thumbnail-img { object-fit: cover; width: 100%; height: 100%; }
-        /* ซ่อน Scrollbar แต่ยังเลื่อนได้สำหรับโหมดปกติ */
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen font-sans flex flex-col items-center py-8 px-4">
     
-    <!-- 🛑 นำ URL Web App อันใหม่ ของคุณมาใส่ที่นี่ 🛑 -->
     <script>
         const GOOGLE_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwwMZdpQs3FFASa54nkro0PyawvVrRvouSi9aezI96N-jKX8S5QrO9DAKQ2Xxy5du7LXA/exec"; 
     </script>
 
     <div class="w-full max-w-md mb-4">
         <h2 class="text-gray-500 font-bold text-sm mb-1">🛠️ โหมดการพัฒนา (Batch Process Mode)</h2>
-        <p class="text-xs text-gray-400">อัปโหลดได้หลายรูป สกัดอัตโนมัติเบื้องหลัง ลองใหม่ได้ 3 ครั้ง</p>
+        <p class="text-xs text-gray-400">อัปโหลดได้หลายรูป สกัดอัตโนมัติเบื้องหลัง มีระบบตรวจสอบเครื่องจักร</p>
     </div>
 
     <main class="w-full max-w-md bg-white rounded-2xl shadow-xl border-t-4 border-yellow-500 overflow-hidden flex flex-col h-[80vh] min-h-[500px]">
@@ -37,23 +34,16 @@
             <span id="queue-counter" class="text-xs bg-gray-100 px-3 py-1.5 rounded-full text-gray-600 font-bold">0 รูป</span>
         </div>
 
-        <!-- พื้นที่หลัก (เลื่อนได้) -->
         <div id="main-content" class="flex-1 overflow-y-auto p-5 bg-gray-50 no-scrollbar">
             
-            <!-- โหมดที่ 1: หน้าจอเลือกรูปภาพ -->
             <div id="upload-mode" class="flex flex-col h-full animate-fade-in">
-                <!-- พื้นที่แสดงรูปที่เลือก (Grid) -->
-                <div id="thumbnails-grid" class="grid grid-cols-3 gap-3 mb-6 auto-rows-[100px] empty:hidden">
-                    <!-- Javascript จะเติมรูปที่นี่ -->
-                </div>
+                <div id="thumbnails-grid" class="grid grid-cols-3 gap-3 mb-6 auto-rows-[100px] empty:hidden"></div>
 
-                <!-- พื้นที่ว่างเมื่อยังไม่มีรูป -->
                 <div id="empty-state" class="flex-1 flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-xl bg-white mb-6">
                     <span class="text-6xl mb-4 opacity-50">📷</span>
                     <p class="text-gray-400 text-sm text-center px-4 font-medium">ยังไม่มีรูปภาพ<br>สามารถเลือกไฟล์พร้อมกันได้หลายรูป</p>
                 </div>
 
-                <!-- ปุ่มเพิ่มรูปภาพ (ติดอยู่ล่างสุดของโหมดเลือกรูป) -->
                 <div class="flex gap-3 w-full mt-auto">
                     <label class="flex-1 bg-white border-2 border-gray-300 text-gray-700 font-bold py-3 px-2 rounded-xl text-center cursor-pointer hover:bg-gray-50 active:bg-gray-100 transition-all shadow-sm flex flex-col items-center justify-center text-sm">
                         <span class="text-2xl mb-1">📁</span> เลือกไฟล์รูป
@@ -66,21 +56,14 @@
                 </div>
             </div>
 
-            <!-- โหมดที่ 2: หน้าจอแสดงผลลัพธ์ (Cards) -->
-            <div id="result-mode" class="hidden flex-col space-y-4 animate-fade-in pb-20">
-                <!-- Javascript จะเติม Card ผลลัพธ์ที่นี่ -->
-            </div>
-
+            <div id="result-mode" class="hidden flex-col space-y-4 animate-fade-in pb-20"></div>
         </div>
 
-        <!-- ปุ่ม Action หลัก (อยู่ด้านล่างเสมอ) -->
         <div class="p-4 bg-white border-t">
-            <!-- ปุ่มสั่งแสดงผลสกัด (โหมด 1) -->
             <button id="btn-extract" disabled class="w-full bg-gray-800 text-white font-bold py-4 rounded-xl shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2" onclick="switchToResultMode()">
                 <span class="text-xl">🤖</span> <span id="btn-extract-text">กรุณาเลือกรูปภาพก่อน</span>
             </button>
             
-            <!-- ปุ่มบันทึกทั้งหมด (โหมด 2) -->
             <button id="btn-save-all" class="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 transition-all hidden flex items-center justify-center gap-2" onclick="saveAllToSheet()">
                 <span class="text-xl">💾</span> บันทึกรับเข้าสต็อกทั้งหมด
             </button>
@@ -89,23 +72,83 @@
                 กลับไปเลือกรูปเพิ่ม
             </button>
         </div>
-
     </main>
 
-    <!-- Canvas สำหรับย่อรูป -->
     <canvas id="canvas" class="hidden"></canvas>
 
     <script>
-        // โครงสร้างข้อมูลคิวรูปภาพ
         let imageQueue = [];
         let isResultMode = false;
         const MAX_CONCURRENT = 3; 
         const MAX_RETRIES = 3;    
-
-        // 🌟 เก็บ Instance ของ Panzoom
         const panzoomInstances = {};
 
-        // 1. จัดการเมื่อผู้ใช้เลือกไฟล์
+        // 🌟 เพิ่มตัวแปรและกฎสำหรับการตรวจเครื่องจักร
+        let machineList = [];
+        const PART_PRODUCT_MAP = {
+            '51150220': 'S1B29288-JR (10A)',
+            '51150221': 'S1B71819-JR (16A)',
+            '51150222': 'S1B29292-JR (20A)'
+        };
+
+        // 🌟 โหลดรายชื่อเครื่องจักรทันทีที่เปิดเว็บ
+        window.onload = function() {
+            fetch(GOOGLE_WEB_APP_URL, {
+                method: 'POST',
+                body: JSON.stringify({ action: 'get_machines' })
+            })
+            .then(res => res.json())
+            .then(result => {
+                if (result.status === 'success') {
+                    machineList = result.machines;
+                    console.log("โหลดรายชื่อเครื่องจักรสำเร็จ", machineList);
+                }
+            })
+            .catch(err => console.error("Error fetching machines:", err));
+        };
+
+        // 🌟 ฟังก์ชันตรวจสอบความถูกต้องเมื่อเลือกเครื่อง หรือแก้ไข Part
+        window.validateMachine = function(id) {
+            const partEl = document.getElementById('part_' + id);
+            const machineEl = document.getElementById('machine_' + id);
+            const msgEl = document.getElementById('val_msg_' + id);
+
+            if (!partEl || !machineEl || !msgEl) return true;
+
+            const partNo = partEl.innerText.trim();
+            const selectedMachineId = machineEl.value;
+
+            // ถ้ายืนยันยังไม่ได้เลือกเครื่องจักร
+            if (!selectedMachineId) {
+                msgEl.innerHTML = '';
+                machineEl.className = 'w-full p-2 border border-gray-300 rounded focus:outline-none focus:border-blue-500 text-sm bg-white transition-colors';
+                return false;
+            }
+
+            const requiredProduct = PART_PRODUCT_MAP[partNo];
+            const machineObj = machineList.find(m => m.id === selectedMachineId);
+
+            // ถ้าเป็น Part นอกเหนือจากที่ตั้งกฎไว้ (อนุโลมให้ผ่าน แต่เตือน)
+            if (!requiredProduct) {
+                 msgEl.innerHTML = '<span class="text-orange-500 font-bold">⚠️ Part No นี้ไม่ได้ระบุกฎการจับคู่</span>';
+                 machineEl.className = 'w-full p-2 border border-orange-400 rounded focus:outline-none focus:border-orange-500 text-sm bg-orange-50 transition-colors';
+                 return true;
+            }
+
+            // ถ้าจับคู่ถูกต้อง
+            if (machineObj && machineObj.product.includes(requiredProduct)) {
+                msgEl.innerHTML = '<span class="text-green-600 font-bold flex items-center gap-1"><svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path></svg> ถูกต้อง! สเปคตรงตามเงื่อนไข</span>';
+                machineEl.className = 'w-full p-2 border border-green-500 rounded focus:outline-none focus:border-green-500 text-sm bg-green-50 text-green-800 transition-colors shadow-inner';
+                return true;
+            } 
+            // ถ้าจับคู่ผิด
+            else {
+                msgEl.innerHTML = `<span class="text-red-600 font-bold">✗ ผิดพลาด! Part นี้ต้องขึ้นงานกับ ${requiredProduct}</span>`;
+                machineEl.className = 'w-full p-2 border border-red-500 rounded focus:outline-none focus:border-red-500 text-sm bg-red-50 text-red-700 transition-colors shadow-inner';
+                return false;
+            }
+        }
+
         function handleFiles(event) {
             const files = event.target.files;
             if (!files || files.length === 0) return;
@@ -121,7 +164,6 @@
             event.target.value = '';
         }
 
-        // 2. ย่อขนาดรูปผ่าน Canvas และเข้าคิว
         function resizeAndQueueImage(dataUrl) {
             const img = new Image();
             img.onload = () => {
@@ -156,7 +198,6 @@
             img.src = dataUrl;
         }
 
-        // 3. ระบบจัดการคิว (ทำงานเบื้องหลัง)
         async function processQueue() {
             const processingItems = imageQueue.filter(item => item.status === 'processing');
             if (processingItems.length >= MAX_CONCURRENT) return; 
@@ -207,7 +248,6 @@
             processQueue();
         }
 
-        // 4. จัดการเมื่อส่งพลาด
         function handleItemFailure(item) {
             item.retries++;
             if (item.retries >= MAX_RETRIES) {
@@ -217,10 +257,8 @@
             }
         }
 
-        // 5. อัปเดต UI หน้าแรก
         function updateUploadUI() {
             document.getElementById('queue-counter').innerText = `${imageQueue.length} รูป`;
-            
             const grid = document.getElementById('thumbnails-grid');
             grid.innerHTML = ''; 
             
@@ -239,7 +277,6 @@
             }
         }
 
-        // 6. เปลี่ยนโหมด UI
         function switchToResultMode() {
             if (imageQueue.length === 0) return;
             isResultMode = true;
@@ -263,56 +300,45 @@
             document.getElementById('btn-back').classList.add('hidden');
         }
 
-        // 🌟 ฟังก์ชันเปิด/ปิดรูปขยาย (อัปเดตระบบ Panzoom)
         window.togglePreviewImage = function(id) {
             const previewContainer = document.getElementById('preview_' + id);
             if (previewContainer) {
                 previewContainer.classList.toggle('hidden');
-                
                 const imgElement = document.getElementById('img_zoom_' + id);
 
                 if (!previewContainer.classList.contains('hidden')) {
-                    // สร้าง Panzoom เมื่อเปิดรูป
                     if (!panzoomInstances[id] && typeof Panzoom !== 'undefined') {
-                        panzoomInstances[id] = Panzoom(imgElement, {
-                            maxScale: 5,
-                            minScale: 1,
-                            contain: 'outside',
-                            step: 0.3
-                        });
-                        // ผูก event เพื่อให้ใช้นิ้วซูม/ลูกกลิ้งเมาส์ได้
+                        panzoomInstances[id] = Panzoom(imgElement, { maxScale: 5, minScale: 1, contain: 'outside', step: 0.3 });
                         const wrapper = imgElement.parentElement;
                         wrapper.addEventListener('wheel', panzoomInstances[id].zoomWithWheel);
                     }
                 } else {
-                    // หากซ่อนรูป ให้รีเซ็ตการซูมกลับ 100%
-                    if (panzoomInstances[id]) {
-                        panzoomInstances[id].reset();
-                    }
+                    if (panzoomInstances[id]) panzoomInstances[id].reset();
                 }
             }
         }
 
-        // 🌟 ฟังก์ชันกดปุ่มซูมด่วน (อัปเดตระบบ Panzoom)
         window.toggleZoomById = function(id) {
             if (panzoomInstances[id]) {
                 const currentScale = panzoomInstances[id].getScale();
-                if (currentScale > 1.2) {
-                    // หากซูมอยู่ ให้ย่อกลับ 100%
-                    panzoomInstances[id].reset({ animate: true });
-                } else {
-                    // หากไม่ได้ซูม ให้ซูมเข้า 2.5 เท่า (มีแอนิเมชัน)
-                    panzoomInstances[id].zoom(2.5, { animate: true });
-                }
+                if (currentScale > 1.2) panzoomInstances[id].reset({ animate: true });
+                else panzoomInstances[id].zoom(2.5, { animate: true });
             }
         }
 
-        // 7. วาด Card ผลลัพธ์
         function renderResultCards() {
             const container = document.getElementById('result-mode');
             container.innerHTML = '';
             
             let isWorking = false;
+
+            // 🌟 เตรียม Option สำหรับ Select Machine
+            let machineOptionsHTML = '<option value="">-- กรุณาเลือกเครื่องจักร --</option>';
+            machineList.forEach(m => {
+                // ตัดคำว่า Machine_ ออกเพื่อแสดงผลให้ดูง่ายขึ้น
+                const displayName = m.id.replace('Machine_', '') + ` [${m.product}]`;
+                machineOptionsHTML += `<option value="${m.id}">${displayName}</option>`;
+            });
 
             imageQueue.forEach((item, index) => {
                 const card = document.createElement('div');
@@ -345,7 +371,7 @@
                         <button class="text-red-400 hover:text-red-600 text-xl font-bold px-2" onclick="removeItem('${item.id}')">&times;</button>
                         </div>
                         
-                        <!-- 🌟 พื้นที่รูปภาพขยาย (ปรับให้รองรับการเลื่อนและซูมได้อย่างอิสระบนมือถือ) -->
+                        <!-- พื้นที่รูปภาพขยาย -->
                         <div id="preview_${item.id}" class="hidden mb-4 rounded-lg overflow-hidden border border-gray-300 relative bg-gray-900 animate-fade-in shadow-inner">
                             <div class="flex justify-between items-center bg-gray-800 text-white px-3 py-1.5 text-xs sticky top-0 z-10 shadow-md">
                                 <span class="font-bold flex items-center gap-1">👁️ เทียบข้อมูลต้นฉบับ</span>
@@ -354,16 +380,8 @@
                                     <button onclick="togglePreviewImage('${item.id}')" class="text-gray-300 hover:text-white px-2 py-1 rounded bg-gray-700 border border-gray-600">ซ่อน ✕</button>
                                 </div>
                             </div>
-                            
-                            <!-- Wrapper พิเศษใส่ class touch-none เพื่อปิดฟังก์ชันปัดจอของมือถือตอนกำลังซูม -->
                             <div class="w-full bg-black text-center h-[300px] overflow-hidden relative touch-none">
                                 <img id="img_zoom_${item.id}" src="${item.base64}" class="w-full h-full object-contain cursor-move pointer-events-auto">
-                                <!-- คำแนะนำ -->
-                                <div class="absolute bottom-2 left-0 right-0 pointer-events-none flex justify-center">
-                                    <span class="bg-black bg-opacity-70 text-white text-[10px] px-3 py-1.5 rounded-full flex items-center gap-2">
-                                        <span>👆 ใช้นิ้วถ่างเพื่อซูม</span> <span>🖐️ ลากเพื่อเลื่อน</span>
-                                    </span>
-                                </div>
                             </div>
                         </div>
 
@@ -371,7 +389,8 @@
                         <div class="grid grid-cols-2 gap-3 text-sm">
                             <div class="bg-blue-50 p-2 rounded-lg border border-blue-100">
                                 <span class="text-[10px] text-blue-500 block font-bold">PART NO.</span>
-                                <div id="part_${item.id}" class="text-gray-800 font-bold" contenteditable="true">${item.data.part || '-'}</div>
+                                <!-- 🌟 ใส่ event onkeyup เพื่อตรวจสอบทันทีถ้า User แก้ไขเลข Part -->
+                                <div id="part_${item.id}" class="text-gray-800 font-bold" contenteditable="true" onkeyup="validateMachine('${item.id}')">${item.data.part || '-'}</div>
                             </div>
                             <div class="bg-indigo-50 p-2 rounded-lg border border-indigo-100">
                                 <span class="text-[10px] text-indigo-500 block font-bold">LOT NO.</span>
@@ -386,6 +405,16 @@
                                 <div id="reel_${item.id}" class="text-gray-800 font-bold" contenteditable="true">${item.data.reel || '-'}</div>
                             </div>
                         </div>
+                        
+                        <!-- 🌟 พื้นที่เลือกเครื่องจักร -->
+                        <div class="mt-4 p-3 bg-gray-50 border border-gray-200 rounded-lg shadow-sm">
+                            <label class="block text-xs font-bold text-gray-700 mb-2">⚙️ ตรวจสอบการขึ้นงาน (เลือกเครื่องจักร)</label>
+                            <select id="machine_${item.id}" class="w-full p-2 border border-gray-300 rounded focus:outline-none focus:border-blue-500 text-sm bg-white transition-colors" onchange="validateMachine('${item.id}')">
+                                ${machineOptionsHTML}
+                            </select>
+                            <div id="val_msg_${item.id}" class="text-[11px] mt-1 min-h-[16px]"></div>
+                        </div>
+
                         <div class="text-[10px] text-gray-400 text-center mt-3 flex items-center justify-center gap-1">
                             <span>💡 แตะตัวเลขเพื่อแก้ไข</span> หรือ <button class="text-blue-500 underline font-bold" onclick="togglePreviewImage('${item.id}')">ดู/ซูมรูปเทียบข้อมูล</button>
                         </div>
@@ -423,7 +452,6 @@
             }
         }
 
-        // 8. ให้ผู้ใช้สั่งลองใหม่เอง
         function manualRetry(id) {
             const item = imageQueue.find(i => i.id === id);
             if (item) {
@@ -434,7 +462,6 @@
             }
         }
 
-        // ลบรูปที่ไม่ต้องการ พร้อมคืนหน่วยความจำ
         function removeItem(id) {
             imageQueue = imageQueue.filter(i => i.id !== id);
             if (panzoomInstances[id]) {
@@ -446,23 +473,46 @@
             else renderResultCards();
         }
 
-        // 9. บันทึกข้อมูล
         async function saveAllToSheet() {
             const validItems = imageQueue.filter(i => i.status === 'success');
             if (validItems.length === 0) return alert("ไม่มีข้อมูลที่สมบูรณ์ให้บันทึก");
+
+            // 🌟 ตรวจสอบความถูกต้องของเครื่องจักรก่อนเซฟ
+            let allValid = true;
+            for (let item of validItems) {
+                const machineEl = document.getElementById('machine_' + item.id);
+                if (!machineEl || !machineEl.value) {
+                    alert(`กรุณาเลือกเครื่องจักรให้ครบทุกรายการ (รูปภาพที่ ${imageQueue.indexOf(item)+1} ยังไม่ได้เลือก)`);
+                    machineEl.focus();
+                    allValid = false;
+                    break;
+                }
+                if (!validateMachine(item.id)) {
+                    alert(`มีการจับคู่เครื่องจักรผิดพลาดที่รูปภาพที่ ${imageQueue.indexOf(item)+1} กรุณาแก้ไขก่อนบันทึก`);
+                    machineEl.focus();
+                    allValid = false;
+                    break;
+                }
+            }
+            if (!allValid) return; // ถ้าเช็คไม่ผ่าน สั่งหยุดการทำงานทันที
 
             const btnSave = document.getElementById('btn-save-all');
             btnSave.disabled = true;
             btnSave.innerHTML = "กำลังบันทึก...";
 
             const payloadDataArray = validItems.map(item => {
+                // ดึงข้อมูลชื่อเครื่องจักรที่เลือกด้วย (เอาแค่คำว่า Machine_XXX โดยลบ Product ด้านหลังออก)
+                const rawMachineValue = document.getElementById('machine_' + item.id).value;
+                const machineName = rawMachineValue.replace('Machine_', '');
+
                 return {
                     id: item.id,
                     data: {
                         part: document.getElementById('part_' + item.id).innerText.trim(),
                         lot: document.getElementById('lot_' + item.id).innerText.trim(),
                         weight: document.getElementById('weight_' + item.id).innerText.trim(),
-                        reel: document.getElementById('reel_' + item.id).innerText.trim()
+                        reel: document.getElementById('reel_' + item.id).innerText.trim(),
+                        machine: machineName // 🌟 แนบชื่อเครื่องจักรไปเซฟด้วย
                     }
                 };
             });
