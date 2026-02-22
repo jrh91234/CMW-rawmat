@@ -358,14 +358,19 @@
                         </div>
                     `;
                 } 
-                else if (item.status === 'error') {
+                else if (item.status === 'error' || item.status === 'duplicate') {
+                    const isDup = item.status === 'duplicate';
+                    const badgeText = isDup ? '✗ ข้อมูลซ้ำ' : '✗ ล้มเหลว';
+                    const errorMsg = isDup ? 'รูปซ้ำ! ข้อมูลนี้มีในสต็อกแล้ว' : 'ไม่สามารถอ่านรูปนี้ได้ (ลอง 3 ครั้งแล้ว)';
+                    const actionBtn = isDup ? '' : `<button class="px-4 py-1.5 bg-gray-200 text-gray-700 rounded-lg text-sm font-bold hover:bg-gray-300" onclick="manualRetry('${item.id}')">ลองใหม่</button>`;
+
                     html += `
-                        <div class="text-xs font-bold text-red-600 bg-red-50 px-2 py-1 rounded-full">✗ ล้มเหลว</div>
+                        <div class="text-xs font-bold text-red-600 bg-red-50 px-2 py-1 rounded-full">${badgeText}</div>
                         <button class="text-red-400 hover:text-red-600 text-xl font-bold px-2" onclick="removeItem('${item.id}')">&times;</button>
                         </div>
                         <div class="text-center py-4 flex flex-col items-center">
-                            <span class="text-red-500 text-sm mb-2">ไม่สามารถอ่านรูปนี้ได้ (ลอง 3 ครั้งแล้ว)</span>
-                            <button class="px-4 py-1.5 bg-gray-200 text-gray-700 rounded-lg text-sm font-bold hover:bg-gray-300" onclick="manualRetry('${item.id}')">ลองใหม่</button>
+                            <span class="text-red-500 text-sm mb-2 font-bold">${errorMsg}</span>
+                            ${actionBtn}
                         </div>
                     `;
                 }
@@ -448,11 +453,11 @@
                         const isSuccess = successIds.includes(item.id);
                         if (isSuccess) return false; // ลบออก
                         
-                        // ถ้าระบบบอกว่าซ้ำ ให้ใส่สถานะ error พิเศษ
+                        // ถ้าระบบบอกว่าซ้ำ ให้เปลี่ยนสถานะเป็น duplicate พิเศษ
                         const dupInfo = duplicateItems.find(d => d.id === item.id);
                         if (dupInfo) {
-                            item.status = 'error';
-                            // Trick: ใช้ HTML แทรกในปุ่มลองใหม่ไม่ได้ เลยบังคับให้ลบง่ายกว่า
+                            item.status = 'duplicate';
+                            // แจ้งเตือน Popup เบื้องต้น
                             alert(`พบรายการซ้ำ: รูปที่ ${imageQueue.indexOf(item)+1} กรุณาแก้ไขข้อมูลหรือลบทิ้ง`);
                         }
                         return true;
