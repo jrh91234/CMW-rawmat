@@ -11,11 +11,15 @@
         [contenteditable="true"]:hover { background-color: rgba(255,255,255,0.8); cursor: text; border-radius: 4px; box-shadow: 0 0 0 1px #cbd5e1; }
         [contenteditable="true"]:focus { outline: 2px solid #3b82f6; background-color: #fff; border-radius: 4px; padding: 0 4px; }
         .thumbnail-img { object-fit: cover; width: 100%; height: 100%; }
-        /* ซ่อน Scrollbar แต่ยังเลื่อนได้ */
+        /* ซ่อน Scrollbar แต่ยังเลื่อนได้สำหรับโหมดปกติ */
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         
-        /* สไตล์เพิ่มเติมสำหรับรูปขยาย */
+        /* สไตล์สำหรับ Scrollbar ตอนซูมรูป */
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #1f2937; }
+
         .zoom-overlay { transition: all 0.2s ease-in-out; }
     </style>
 </head>
@@ -98,7 +102,6 @@
 
     <script>
         // โครงสร้างข้อมูลคิวรูปภาพ
-        // [{ id, base64, status: 'pending'|'processing'|'success'|'error', retries: 0, data: null }]
         let imageQueue = [];
         let isResultMode = false;
         const MAX_CONCURRENT = 3; // ส่งทีละ 3 รูป
@@ -143,39 +146,34 @@
                 const base64 = canvas.toDataURL('image/jpeg', 0.8);
                 const uniqueId = 'img_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
                 
-                // เพิ่มเข้าคิว
                 imageQueue.push({
                     id: uniqueId,
                     base64: base64,
-                    status: 'pending', // สถานะเตรียมตัว
+                    status: 'pending',
                     retries: 0,
                     data: null
                 });
 
                 updateUploadUI();
-                processQueue(); // 🌟 ปลุกระบบเบื้องหลังให้ทำงานทันที!
+                processQueue();
             }
             img.src = dataUrl;
         }
 
         // 3. ระบบจัดการคิว (ทำงานเบื้องหลัง)
         async function processQueue() {
-            // นับว่ากำลังทำงานอยู่กี่งาน
             const processingItems = imageQueue.filter(item => item.status === 'processing');
-            if (processingItems.length >= MAX_CONCURRENT) return; // เต็มโควต้าแล้ว รอก่อน
+            if (processingItems.length >= MAX_CONCURRENT) return; 
 
-            // หาคิวที่ว่างอยู่ (ดึงมาไม่เกินโควต้าที่เหลือ)
             const availableSlots = MAX_CONCURRENT - processingItems.length;
             const pendingItems = imageQueue.filter(item => item.status === 'pending').slice(0, availableSlots);
             
-            if (pendingItems.length === 0) return; // ไม่มีคิวแล้ว
+            if (pendingItems.length === 0) return;
 
-            // เปลี่ยนสถานะเป็นกำลังประมวลผล
             pendingItems.forEach(item => item.status = 'processing');
-            if (isResultMode) renderResultCards(); // อัปเดต UI หากเปิดโหมดดูผลอยู่
+            if (isResultMode) renderResultCards();
 
             try {
-                // จัดเตรียมข้อมูลส่งให้ Backend (แบบกลุ่ม)
                 const payloadImages = pendingItems.map(item => ({
                     id: item.id,
                     image: item.base64.split(',')[1],
@@ -191,7 +189,6 @@
                 const result = await response.json();
 
                 if (result.status === 'success') {
-                    // อัปเดตผลลัพธ์ทีละรายการ
                     result.results.forEach(res => {
                         const item = imageQueue.find(i => i.id === res.id);
                         if (item) {
@@ -199,41 +196,37 @@
                                 item.status = 'success';
                                 item.data = res.data;
                             } else {
-                                handleItemFailure(item); // กรณี Backend สกัดบางรูปพลาด
+                                handleItemFailure(item);
                             }
                         }
                     });
                 } else {
-                    // Server Error ทั้งก้อน
                     pendingItems.forEach(item => handleItemFailure(item));
                 }
             } catch (error) {
-                // เน็ตหลุด หรือ Timeout
                 pendingItems.forEach(item => handleItemFailure(item));
             }
 
             if (isResultMode) renderResultCards();
-            
-            // เมื่อเสร็จ 1 รอบ ให้เรียกตัวเองซ้ำเพื่อเช็คว่ามีคิวเหลืออีกไหม
             processQueue();
         }
 
-        // 4. จัดการเมื่อส่งพลาด (นับ Retry อัตโนมัติ)
+        // 4. จัดการเมื่อส่งพลาด
         function handleItemFailure(item) {
             item.retries++;
             if (item.retries >= MAX_RETRIES) {
-                item.status = 'error'; // ล้มเหลวถาวร ต้องให้ User สั่งใหม่
+                item.status = 'error';
             } else {
-                item.status = 'pending'; // กลับไปเข้าคิวใหม่
+                item.status = 'pending';
             }
         }
 
-        // 5. อัปเดต UI หน้าแรก (โหมดแอบทำ)
+        // 5. อัปเดต UI หน้าแรก
         function updateUploadUI() {
             document.getElementById('queue-counter').innerText = `${imageQueue.length} รูป`;
             
             const grid = document.getElementById('thumbnails-grid');
-            grid.innerHTML = ''; // ล้างของเก่า
+            grid.innerHTML = ''; 
             
             imageQueue.forEach(item => {
                 const div = document.createElement('div');
@@ -250,7 +243,7 @@
             }
         }
 
-        // 6. เปลี่ยนเป็นโหมดแสดงผล (เมื่อกดปุ่มสกัด)
+        // 6. เปลี่ยนโหมด UI
         function switchToResultMode() {
             if (imageQueue.length === 0) return;
             isResultMode = true;
@@ -279,22 +272,50 @@
             const previewContainer = document.getElementById('preview_' + id);
             if (previewContainer) {
                 previewContainer.classList.toggle('hidden');
+                // หากซ่อนรูปอยู่ ให้รีเซ็ตการซูมกลับไปขนาดปกติ
+                if (previewContainer.classList.contains('hidden')) {
+                    const img = document.getElementById('img_zoom_' + id);
+                    if (img && !img.classList.contains('w-full')) {
+                        toggleZoomById('img_zoom_' + id);
+                    }
+                }
             }
         }
 
-        // 7. วาด Card ผลลัพธ์ (ตามสถานะปัจจุบันของแต่ละรูป)
+        // 🌟 ฟังก์ชันใหม่: จัดการการซูมรูปภาพ
+        window.toggleZoomById = function(imgId) {
+            const img = document.getElementById(imgId);
+            if (!img) return;
+            
+            if (img.classList.contains('w-full')) {
+                // ซูมเข้า (Zoom In)
+                img.classList.remove('w-full', 'max-h-64', 'object-contain', 'cursor-zoom-in');
+                img.classList.add('w-[250%]', 'max-w-[250%]', 'h-auto', 'cursor-zoom-out');
+                
+                // เลื่อนหน้าจอให้ไปอยู่จุดกึ่งกลางของรูปที่ถูกซูม
+                setTimeout(() => {
+                    const container = img.parentElement;
+                    container.scrollLeft = (container.scrollWidth - container.clientWidth) / 2;
+                    container.scrollTop = (container.scrollHeight - container.clientHeight) / 2;
+                }, 50);
+            } else {
+                // ย่อกลับ (Zoom Out)
+                img.classList.add('w-full', 'max-h-64', 'object-contain', 'cursor-zoom-in');
+                img.classList.remove('w-[250%]', 'max-w-[250%]', 'h-auto', 'cursor-zoom-out');
+            }
+        }
+
+        // 7. วาด Card ผลลัพธ์
         function renderResultCards() {
             const container = document.getElementById('result-mode');
             container.innerHTML = '';
             
-            // เช็คว่ามีรูปไหนกำลังทำงานอยู่ไหม (เพื่อจัดการปุ่ม Save)
             let isWorking = false;
 
             imageQueue.forEach((item, index) => {
                 const card = document.createElement('div');
                 card.className = 'bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex flex-col relative';
                 
-                // เลขลำดับและรูปภาพเล็กๆ ที่คลิกเพื่อดูรูปใหญ่ได้
                 let html = `
                     <div class="flex gap-3 mb-3 items-center border-b pb-3">
                         <div class="relative cursor-pointer group rounded overflow-hidden w-12 h-12 border shadow-sm" onclick="togglePreviewImage('${item.id}')" title="แตะเพื่อขยายรูปตรวจสอบ">
@@ -306,7 +327,6 @@
                         <div class="flex-1 font-bold text-gray-700">รูปภาพที่ ${index + 1}</div>
                 `;
 
-                // ส่วนแสดงผลตามสถานะ
                 if (item.status === 'pending' || item.status === 'processing') {
                     isWorking = true;
                     html += `
@@ -323,14 +343,17 @@
                         <button class="text-red-400 hover:text-red-600 text-xl font-bold px-2" onclick="removeItem('${item.id}')">&times;</button>
                         </div>
                         
-                        <!-- 🌟 พื้นที่รูปภาพขยาย (ซ่อนไว้เป็นค่าเริ่มต้น) -->
+                        <!-- 🌟 พื้นที่รูปภาพขยาย พร้อมระบบซูม -->
                         <div id="preview_${item.id}" class="hidden mb-4 rounded-lg overflow-hidden border border-gray-300 relative bg-gray-900 animate-fade-in shadow-inner">
-                            <div class="flex justify-between items-center bg-gray-800 text-white px-3 py-1.5 text-xs">
+                            <div class="flex justify-between items-center bg-gray-800 text-white px-3 py-1.5 text-xs sticky top-0 z-10 shadow-md">
                                 <span class="font-bold flex items-center gap-1">👁️ เทียบข้อมูลต้นฉบับ</span>
-                                <button onclick="togglePreviewImage('${item.id}')" class="text-gray-300 hover:text-white px-2 py-1 rounded bg-gray-700">ซ่อน ✕</button>
+                                <div class="flex gap-2">
+                                    <button onclick="toggleZoomById('img_zoom_${item.id}')" class="text-blue-200 hover:text-white px-2 py-1 rounded bg-blue-900 border border-blue-700 flex items-center gap-1"><span class="text-[10px]">🔍</span> ซูมรูป</button>
+                                    <button onclick="togglePreviewImage('${item.id}')" class="text-gray-300 hover:text-white px-2 py-1 rounded bg-gray-700 border border-gray-600">ซ่อน ✕</button>
+                                </div>
                             </div>
-                            <div class="p-2 flex justify-center cursor-pointer" onclick="togglePreviewImage('${item.id}')" title="แตะเพื่อซ่อน">
-                                <img src="${item.base64}" class="w-full max-h-64 object-contain rounded">
+                            <div class="overflow-auto max-h-[50vh] w-full bg-black text-center custom-scrollbar">
+                                <img id="img_zoom_${item.id}" src="${item.base64}" class="inline-block w-full max-h-64 object-contain cursor-zoom-in transition-all duration-300 origin-center" onclick="toggleZoomById('img_zoom_${item.id}')" title="แตะเพื่อซูม">
                             </div>
                         </div>
 
@@ -354,7 +377,7 @@
                             </div>
                         </div>
                         <div class="text-[10px] text-gray-400 text-center mt-3 flex items-center justify-center gap-1">
-                            <span>💡 แตะที่ตัวเลขเพื่อแก้ไข</span> หรือ <button class="text-blue-500 underline" onclick="togglePreviewImage('${item.id}')">ดูรูปต้นฉบับ</button>
+                            <span>💡 แตะตัวเลขเพื่อแก้ไข</span> หรือ <button class="text-blue-500 underline font-bold" onclick="togglePreviewImage('${item.id}')">ซูมรูปเทียบข้อมูล</button>
                         </div>
                     `;
                 } 
@@ -378,7 +401,6 @@
                 container.appendChild(card);
             });
 
-            // ปรับปุ่ม Save ให้พร้อมกดเมื่อทุกอย่างเสร็จหมด
             const btnSave = document.getElementById('btn-save-all');
             if (isWorking) {
                 btnSave.disabled = true;
@@ -391,14 +413,14 @@
             }
         }
 
-        // 8. ให้ผู้ใช้สั่งลองใหม่เอง (เฉพาะรูปที่ Failed เกิน 3 รอบ)
+        // 8. ให้ผู้ใช้สั่งลองใหม่เอง
         function manualRetry(id) {
             const item = imageQueue.find(i => i.id === id);
             if (item) {
                 item.status = 'pending';
-                item.retries = 0; // รีเซ็ตการนับ
+                item.retries = 0;
                 renderResultCards();
-                processQueue(); // ปลุกระบบเบื้องหลังมาทำใหม่
+                processQueue();
             }
         }
 
@@ -410,9 +432,8 @@
             else renderResultCards();
         }
 
-        // 9. บันทึกข้อมูลที่สำเร็จทั้งหมดลง Sheet
+        // 9. บันทึกข้อมูล
         async function saveAllToSheet() {
-            // ดึงเฉพาะอันที่ success และดึงค่าล่าสุดจากช่องที่ user อาจจะแก้ไข
             const validItems = imageQueue.filter(i => i.status === 'success');
             if (validItems.length === 0) return alert("ไม่มีข้อมูลที่สมบูรณ์ให้บันทึก");
 
@@ -444,20 +465,16 @@
                 if (result.status === 'success' || result.status === 'partial') {
                     alert('✅ ' + result.message);
                     
-                    // ลบรูปที่บันทึกสำเร็จออกจากคิว
                     const successIds = result.successIds || [];
                     const duplicateItems = result.duplicateItems || [];
                     
                     imageQueue = imageQueue.filter(item => {
-                        // เก็บไว้ถ้ามันซ้ำ (เผื่อ User อยากแก้ข้อมูล) หรือไม่ได้ส่งไปเซฟ
                         const isSuccess = successIds.includes(item.id);
-                        if (isSuccess) return false; // ลบออก
+                        if (isSuccess) return false; 
                         
-                        // ถ้าระบบบอกว่าซ้ำ ให้เปลี่ยนสถานะเป็น duplicate พิเศษ
                         const dupInfo = duplicateItems.find(d => d.id === item.id);
                         if (dupInfo) {
                             item.status = 'duplicate';
-                            // แจ้งเตือน Popup เบื้องต้น
                             alert(`พบรายการซ้ำ: รูปที่ ${imageQueue.indexOf(item)+1} กรุณาแก้ไขข้อมูลหรือลบทิ้ง`);
                         }
                         return true;
