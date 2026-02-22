@@ -14,6 +14,9 @@
         /* ซ่อน Scrollbar แต่ยังเลื่อนได้ */
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        /* สไตล์เพิ่มเติมสำหรับรูปขยาย */
+        .zoom-overlay { transition: all 0.2s ease-in-out; }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen font-sans flex flex-col items-center py-8 px-4">
@@ -271,6 +274,14 @@
             document.getElementById('btn-back').classList.add('hidden');
         }
 
+        // ฟังก์ชันเปิด/ปิดรูปขยาย
+        window.togglePreviewImage = function(id) {
+            const previewContainer = document.getElementById('preview_' + id);
+            if (previewContainer) {
+                previewContainer.classList.toggle('hidden');
+            }
+        }
+
         // 7. วาด Card ผลลัพธ์ (ตามสถานะปัจจุบันของแต่ละรูป)
         function renderResultCards() {
             const container = document.getElementById('result-mode');
@@ -283,10 +294,15 @@
                 const card = document.createElement('div');
                 card.className = 'bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex flex-col relative';
                 
-                // เลขลำดับและรูปภาพเล็กๆ
+                // เลขลำดับและรูปภาพเล็กๆ ที่คลิกเพื่อดูรูปใหญ่ได้
                 let html = `
                     <div class="flex gap-3 mb-3 items-center border-b pb-3">
-                        <img src="${item.base64}" class="w-12 h-12 rounded object-cover border">
+                        <div class="relative cursor-pointer group rounded overflow-hidden w-12 h-12 border shadow-sm" onclick="togglePreviewImage('${item.id}')" title="แตะเพื่อขยายรูปตรวจสอบ">
+                            <img src="${item.base64}" class="w-full h-full object-cover">
+                            <div class="absolute inset-0 bg-black bg-opacity-40 flex items-center justify-center zoom-overlay">
+                                <span class="text-white text-lg">🔍</span>
+                            </div>
+                        </div>
                         <div class="flex-1 font-bold text-gray-700">รูปภาพที่ ${index + 1}</div>
                 `;
 
@@ -306,6 +322,19 @@
                         <div class="text-xs font-bold text-green-600 bg-green-50 px-2 py-1 rounded-full">✓ สำเร็จ</div>
                         <button class="text-red-400 hover:text-red-600 text-xl font-bold px-2" onclick="removeItem('${item.id}')">&times;</button>
                         </div>
+                        
+                        <!-- 🌟 พื้นที่รูปภาพขยาย (ซ่อนไว้เป็นค่าเริ่มต้น) -->
+                        <div id="preview_${item.id}" class="hidden mb-4 rounded-lg overflow-hidden border border-gray-300 relative bg-gray-900 animate-fade-in shadow-inner">
+                            <div class="flex justify-between items-center bg-gray-800 text-white px-3 py-1.5 text-xs">
+                                <span class="font-bold flex items-center gap-1">👁️ เทียบข้อมูลต้นฉบับ</span>
+                                <button onclick="togglePreviewImage('${item.id}')" class="text-gray-300 hover:text-white px-2 py-1 rounded bg-gray-700">ซ่อน ✕</button>
+                            </div>
+                            <div class="p-2 flex justify-center cursor-pointer" onclick="togglePreviewImage('${item.id}')" title="แตะเพื่อซ่อน">
+                                <img src="${item.base64}" class="w-full max-h-64 object-contain rounded">
+                            </div>
+                        </div>
+
+                        <!-- ฟอร์มข้อมูล -->
                         <div class="grid grid-cols-2 gap-3 text-sm">
                             <div class="bg-blue-50 p-2 rounded-lg border border-blue-100">
                                 <span class="text-[10px] text-blue-500 block font-bold">PART NO.</span>
@@ -323,6 +352,9 @@
                                 <span class="text-[10px] text-purple-500 block font-bold">REEL NO.</span>
                                 <div id="reel_${item.id}" class="text-gray-800 font-bold" contenteditable="true">${item.data.reel || '-'}</div>
                             </div>
+                        </div>
+                        <div class="text-[10px] text-gray-400 text-center mt-3 flex items-center justify-center gap-1">
+                            <span>💡 แตะที่ตัวเลขเพื่อแก้ไข</span> หรือ <button class="text-blue-500 underline" onclick="togglePreviewImage('${item.id}')">ดูรูปต้นฉบับ</button>
                         </div>
                     `;
                 } 
