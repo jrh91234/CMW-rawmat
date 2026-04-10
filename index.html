@@ -107,7 +107,8 @@
                 part: pickFirstValue(rawData, ['part', 'partNo', 'part_no']),
                 lot: pickFirstValue(rawData, ['lot', 'lotNo', 'lot_no']),
                 weight: pickFirstValue(rawData, ['weight', 'netWeight', 'net_weight']),
-                reel: pickFirstValue(rawData, ['reel', 'reelNo', 'reel_no'])
+                reel: pickFirstValue(rawData, ['reel', 'reelNo', 'reel_no']),
+                date: pickFirstValue(rawData, ['date', 'mfgDate', 'productionDate', 'ocrDate'])
             };
 
             // ป้องกันบั๊ก Reel No. ไปดึงค่า Lot No. มาใช้
@@ -116,6 +117,61 @@
             }
 
             return normalized;
+        }
+
+        function normalizeOcrDate(value) {
+            const raw = sanitizeField(value);
+            if (!raw) return '';
+
+            const matched = raw.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+            if (!matched) return raw;
+
+            let day = matched[1].padStart(2, '0');
+            let month = matched[2].padStart(2, '0');
+            let year = matched[3];
+
+            if (year.length === 2) year = '20' + year;
+            if (parseInt(year, 10) > 2500) year = String(parseInt(year, 10) - 543); // รองรับปี พ.ศ.
+
+            return `${day}/${month}/${year}`; // แสดงผลแบบวัน/เดือน/ปี ค.ศ.
+        }
+
+        function normalizeOcrDateIso(value) {
+            const normalized = normalizeOcrDate(value);
+            if (!normalized) return '';
+            const matched = normalized.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+            if (!matched) return '';
+            const day = matched[1];
+            const month = matched[2];
+            const year = matched[3];
+            return `${year}-${month}-${day}`; // format เก็บข้อมูลเป็นปี ค.ศ. (ISO)
+        }
+
+        function getLoginDisplayName() {
+            const candidateKeys = ['displayName', 'name', 'fullName', 'userDisplayName', 'username'];
+
+            const parseFromStorage = (storage) => {
+                for (const key of candidateKeys) {
+                    const directVal = sanitizeField(storage.getItem(key));
+                    if (directVal) return directVal;
+                }
+
+                const complexKeys = ['currentUser', 'user', 'authUser', 'loginUser'];
+                for (const key of complexKeys) {
+                    const raw = storage.getItem(key);
+                    if (!raw) continue;
+                    try {
+                        const parsed = JSON.parse(raw);
+                        for (const candidate of candidateKeys) {
+                            const val = sanitizeField(parsed?.[candidate]);
+                            if (val) return val;
+                        }
+                    } catch (_) {}
+                }
+                return '';
+            };
+
+            return parseFromStorage(localStorage) || parseFromStorage(sessionStorage) || 'Unknown';
         }
 
         // 🌟 เพิ่มตัวแปรและกฎสำหรับการตรวจเครื่องจักร
@@ -440,6 +496,10 @@
                                 <span class="text-[10px] text-purple-500 block font-bold">REEL NO.</span>
                                 <div id="reel_${item.id}" class="text-gray-800 font-bold" contenteditable="true">${item.data.reel || ''}</div>
                             </div>
+                            <div class="bg-amber-50 p-2 rounded-lg border border-amber-100 col-span-2">
+                                <span class="text-[10px] text-amber-600 block font-bold">DATE (OCR)</span>
+                                <div id="ocr_date_${item.id}" class="text-gray-800 font-bold" contenteditable="true">${normalizeOcrDate(item.data.date) || ''}</div>
+                            </div>
                         </div>
                         
                         <!-- 🌟 พื้นที่เลือกเครื่องจักร -->
@@ -512,6 +572,7 @@
         async function saveAllToSheet() {
             const validItems = imageQueue.filter(i => i.status === 'success');
             if (validItems.length === 0) return alert("ไม่มีข้อมูลที่สมบูรณ์ให้บันทึก");
+            const loginDisplayName = getLoginDisplayName();
 
             // 🌟 ตรวจสอบความถูกต้องของเครื่องจักรก่อนเซฟ
             let allValid = true;
@@ -533,9 +594,12 @@
                 const weightEl = document.getElementById('weight_' + item.id);
                 const lotEl = document.getElementById('lot_' + item.id);
                 const reelEl = document.getElementById('reel_' + item.id);
+                const ocrDateEl = document.getElementById('ocr_date_' + item.id);
                 const weightValue = sanitizeField(weightEl?.innerText);
                 const lotValue = sanitizeField(lotEl?.innerText);
                 const reelValue = sanitizeField(reelEl?.innerText);
+                const ocrDateValue = normalizeOcrDate(ocrDateEl?.innerText);
+                const ocrDateIsoValue = normalizeOcrDateIso(ocrDateEl?.innerText);
 
                 if (!weightValue) {
                     alert(`รูปภาพที่ ${imageQueue.indexOf(item)+1}: กรุณากรอก WEIGHT ก่อนบันทึก`);
@@ -554,6 +618,20 @@
                 if (normalizeCompareText(lotValue) && normalizeCompareText(lotValue) === normalizeCompareText(reelValue)) {
                     alert(`รูปภาพที่ ${imageQueue.indexOf(item)+1}: REEL NO. ต้องไม่ซ้ำกับ LOT NO.`);
                     reelEl?.focus();
+                    allValid = false;
+                    break;
+                }
+
+                if (!ocrDateValue) {
+                    alert(`รูปภาพที่ ${imageQueue.indexOf(item)+1}: กรุณากรอก DATE (OCR) ก่อนบันทึก`);
+                    ocrDateEl?.focus();
+                    allValid = false;
+                    break;
+                }
+
+                if (!ocrDateIsoValue) {
+                    alert(`รูปภาพที่ ${imageQueue.indexOf(item)+1}: DATE (OCR) ต้องอยู่ในรูปแบบวัน/เดือน/ปี ค.ศ. เช่น 21/02/2026`);
+                    ocrDateEl?.focus();
                     allValid = false;
                     break;
                 }
@@ -576,7 +654,10 @@
                         lot: document.getElementById('lot_' + item.id).innerText.trim(),
                         weight: document.getElementById('weight_' + item.id).innerText.trim(),
                         reel: document.getElementById('reel_' + item.id).innerText.trim(),
-                        machine: machineName // 🌟 แนบชื่อเครื่องจักรไปเซฟด้วย
+                        machine: machineName, // 🌟 แนบชื่อเครื่องจักรไปเซฟด้วย
+                        recorder: loginDisplayName,
+                        ocrDate: normalizeOcrDate(document.getElementById('ocr_date_' + item.id)?.innerText),
+                        date: normalizeOcrDateIso(document.getElementById('ocr_date_' + item.id)?.innerText)
                     }
                 };
             });
@@ -585,7 +666,7 @@
                 const response = await fetch(GOOGLE_WEB_APP_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                    body: JSON.stringify({ action: 'batch_save', dataArray: payloadDataArray })
+                    body: JSON.stringify({ action: 'batch_save', dataArray: payloadDataArray, recorder: loginDisplayName })
                 });
 
                 const result = await response.json();
