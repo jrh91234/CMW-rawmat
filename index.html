@@ -98,17 +98,49 @@
             return '';
         }
 
+        function normalizeKeyName(key) {
+            return String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        }
+
+        function pickFirstValueFlexible(source, keys = []) {
+            const direct = pickFirstValue(source, keys);
+            if (direct) return direct;
+
+            const sourceObj = source && typeof source === 'object' ? source : {};
+            const aliasSet = new Set(keys.map(normalizeKeyName));
+
+            for (const [key, value] of Object.entries(sourceObj)) {
+                if (!aliasSet.has(normalizeKeyName(key))) continue;
+                const cleaned = sanitizeField(value);
+                if (cleaned) return cleaned;
+            }
+            return '';
+        }
+
+        function extractDateFromAnyText(source) {
+            if (!source || typeof source !== 'object') return '';
+            const dateRegex = /(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/;
+
+            for (const value of Object.values(source)) {
+                const cleaned = sanitizeField(value);
+                if (!cleaned) continue;
+                const matched = cleaned.match(dateRegex);
+                if (matched) return matched[0];
+            }
+            return '';
+        }
+
         function normalizeCompareText(value) {
             return sanitizeField(value).toLowerCase().replace(/[^a-z0-9]/g, '');
         }
 
         function normalizeOcrData(rawData = {}) {
             const normalized = {
-                part: pickFirstValue(rawData, ['part', 'partNo', 'part_no']),
-                lot: pickFirstValue(rawData, ['lot', 'lotNo', 'lot_no']),
-                weight: pickFirstValue(rawData, ['weight', 'netWeight', 'net_weight']),
-                reel: pickFirstValue(rawData, ['reel', 'reelNo', 'reel_no']),
-                date: pickFirstValue(rawData, ['date', 'mfgDate', 'productionDate', 'ocrDate'])
+                part: pickFirstValueFlexible(rawData, ['part', 'partNo', 'part_no']),
+                lot: pickFirstValueFlexible(rawData, ['lot', 'lotNo', 'lot_no']),
+                weight: pickFirstValueFlexible(rawData, ['weight', 'netWeight', 'net_weight']),
+                reel: pickFirstValueFlexible(rawData, ['reel', 'reelNo', 'reel_no']),
+                date: pickFirstValueFlexible(rawData, ['date', 'mfgDate', 'productionDate', 'ocrDate']) || extractDateFromAnyText(rawData)
             };
 
             // ป้องกันบั๊ก Reel No. ไปดึงค่า Lot No. มาใช้
