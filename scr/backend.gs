@@ -653,7 +653,7 @@ function doPost(e) {
         logUserAction(sheetData[i][0], sheetData[i][2], "LOGIN", "เข้าสู่ระบบสำเร็จ");
         return ContentService.createTextOutput(JSON.stringify({
           success: true,
-          user: { username: String(sheetData[i][0]), role: sheetData[i][2], name: sheetData[i][3] }
+          user: { username: String(sheetData[i][0]), role: sheetData[i][2], name: sheetData[i][3], shift: String(sheetData[i][4] || "") }
         })).setMimeType(ContentService.MimeType.JSON);
       }
     }
@@ -760,6 +760,106 @@ function doPost(e) {
       return ContentService.createTextOutput(JSON.stringify({success: true, message: "ลบผู้ใช้สำเร็จ"})).setMimeType(ContentService.MimeType.JSON);
     } else {
       return ContentService.createTextOutput(JSON.stringify({success: false, message: "ไม่พบผู้ใช้ที่ต้องการลบ"})).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  // --- ส่วนที่ Raw Material: รับเข้าวัตถุดิบ ---
+  if (action === "get_machines") {
+    try {
+      const configSheet = ss.getSheetByName("Config");
+      if (!configSheet) return ContentService.createTextOutput(JSON.stringify({ status: "success", machines: [] })).setMimeType(ContentService.MimeType.JSON);
+      const configData = configSheet.getDataRange().getValues();
+      const machines = [];
+      for (let i = 1; i < configData.length; i++) {
+        const key = String(configData[i][0]).trim();
+        const val = String(configData[i][1]).trim();
+        if (key.startsWith("Machine_") && val !== "" && val !== "Unassigned") {
+          const machineName = key.replace("Machine_", "");
+          machines.push({ id: key, name: machineName, product: val });
+        }
+      }
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", machines: machines })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  if (action === "batch_save") {
+    const lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(15000);
+      let sheet = ss.getSheetByName("RawMaterial");
+      if (!sheet) {
+        sheet = ss.insertSheet("RawMaterial");
+        sheet.appendRow(["Timestamp", "Date", "Part_No", "Lot_No", "Weight", "Machine", "Reel_No", "OCR_Date", "Shift", "Recorder"]);
+      }
+      const headers = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 10)).getValues()[0].map(h => String(h).trim());
+      const ensureHeader = (name) => {
+        if (headers.indexOf(name) === -1) {
+          sheet.getRange(1, headers.length + 1).setValue(name);
+          headers.push(name);
+        }
+      };
+      ["Timestamp","Date","Part_No","Lot_No","Weight","Machine","Reel_No","OCR_Date","Shift","Recorder"].forEach(ensureHeader);
+
+      const getH = (name) => headers.indexOf(name);
+
+      const existingRows = sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).getValues() : [];
+      const lotIdx = getH("Lot_No");
+      const reelIdx = getH("Reel_No");
+      const existingKeys = new Set(existingRows.map(r => String(r[lotIdx] || "") + "|" + String(r[reelIdx] || "")));
+
+      const dataArray = data.dataArray || [];
+      const recorder = String(data.recorder || "Unknown");
+      const shift = String(data.shift || "");
+      const now = new Date();
+
+      const successIds = [];
+      const duplicateItems = [];
+
+      for (const item of dataArray) {
+        const d = item.data || {};
+        const lot = String(d.lot || "").trim();
+        const reel = String(d.reel || "").trim();
+        const key = lot + "|" + reel;
+        if (existingKeys.has(key)) {
+          duplicateItems.push({ id: item.id, lot: lot, reel: reel });
+          continue;
+        }
+        const newRow = new Array(headers.length).fill("");
+        newRow[getH("Timestamp")] = now;
+        newRow[getH("Date")] = String(d.date || "");
+        newRow[getH("Part_No")] = String(d.part || "");
+        newRow[getH("Lot_No")] = lot;
+        newRow[getH("Weight")] = String(d.weight || "");
+        newRow[getH("Machine")] = String(d.machine || "");
+        newRow[getH("Reel_No")] = reel;
+        newRow[getH("OCR_Date")] = String(d.ocrDate || "");
+        newRow[getH("Shift")] = shift || String(d.shift || "");
+        newRow[getH("Recorder")] = String(d.recorder || recorder);
+        sheet.appendRow(newRow);
+        existingKeys.add(key);
+        successIds.push(item.id);
+        logUserAction(recorder, "Production", "SAVE_RAWMAT", `บันทึกวัตถุดิบ Part=${d.part} Lot=${lot} Reel=${reel} Machine=${d.machine}`);
+      }
+
+      const total = dataArray.length;
+      const saved = successIds.length;
+      const dups = duplicateItems.length;
+      let message = `บันทึกสำเร็จ ${saved}/${total} รายการ`;
+      if (dups > 0) message += ` (ซ้ำ ${dups} รายการ)`;
+      const status = saved === 0 && dups > 0 ? "partial" : saved > 0 ? "success" : "error";
+
+      return ContentService.createTextOutput(JSON.stringify({
+        status: status,
+        message: message,
+        successIds: successIds,
+        duplicateItems: duplicateItems
+      })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    } finally {
+      try { lock.releaseLock(); } catch (_) {}
     }
   }
 

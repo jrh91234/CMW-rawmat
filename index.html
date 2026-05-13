@@ -206,6 +206,27 @@
             return parseFromStorage(localStorage) || parseFromStorage(sessionStorage) || 'Unknown';
         }
 
+        function getLoginShift() {
+            const parseShiftFromStorage = (storage) => {
+                const directVal = sanitizeField(storage.getItem('shift'));
+                if (directVal) return directVal;
+
+                const complexKeys = ['currentUser', 'user', 'authUser', 'loginUser'];
+                for (const key of complexKeys) {
+                    const raw = storage.getItem(key);
+                    if (!raw) continue;
+                    try {
+                        const parsed = JSON.parse(raw);
+                        const val = sanitizeField(parsed?.shift);
+                        if (val) return val;
+                    } catch (_) {}
+                }
+                return '';
+            };
+
+            return parseShiftFromStorage(localStorage) || parseShiftFromStorage(sessionStorage) || '';
+        }
+
         // 🌟 เพิ่มตัวแปรและกฎสำหรับการตรวจเครื่องจักร
         let machineList = [];
         const PART_PRODUCT_MAP = {
@@ -605,6 +626,7 @@
             const validItems = imageQueue.filter(i => i.status === 'success');
             if (validItems.length === 0) return alert("ไม่มีข้อมูลที่สมบูรณ์ให้บันทึก");
             const loginDisplayName = getLoginDisplayName();
+            const loginShift = getLoginShift();
 
             // 🌟 ตรวจสอบความถูกต้องของเครื่องจักรก่อนเซฟ
             let allValid = true;
@@ -698,7 +720,7 @@
                 const response = await fetch(GOOGLE_WEB_APP_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                    body: JSON.stringify({ action: 'batch_save', dataArray: payloadDataArray, recorder: loginDisplayName })
+                    body: JSON.stringify({ action: 'batch_save', dataArray: payloadDataArray, recorder: loginDisplayName, shift: loginShift })
                 });
 
                 const result = await response.json();
