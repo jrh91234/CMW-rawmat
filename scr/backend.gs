@@ -50,12 +50,84 @@ function saveImageToDrive(base64Data, filename) {
 
     const file = folder.createFile(blob);
     file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-    
-    return file.getUrl(); 
+
+    return file.getUrl();
   } catch (e) {
     console.error("Save image error: " + e);
     return "";
   }
+}
+
+// ==================================================
+// 🌟 โฟลเดอร์แยกสำหรับรูปการตรวจเช็คอะไหล่
+// ==================================================
+function getOrCreateCheckPhotosFolder() {
+  const props = PropertiesService.getScriptProperties();
+  let folderId = props.getProperty("PARTS_CHECK_PHOTOS_FOLDER_ID");
+  if (folderId) {
+    try { return DriveApp.getFolderById(folderId); } catch (e) { /* fall through */ }
+  }
+  // สร้างเป็น sibling ของโฟลเดอร์ NG เดิม (หา parent ของ folder NG)
+  try {
+    const ngFolder = DriveApp.getFolderById("1GcY_XvQTaBTE75dkrWdh8SnABXfUc6G4");
+    const parents = ngFolder.getParents();
+    const parent = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
+    const newFolder = parent.createFolder("Parts_Check_Photos");
+    newFolder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    props.setProperty("PARTS_CHECK_PHOTOS_FOLDER_ID", newFolder.getId());
+    return newFolder;
+  } catch (e) {
+    console.error("Create check folder error: " + e);
+    // Fallback: ใช้โฟลเดอร์ NG เดิม
+    return DriveApp.getFolderById("1GcY_XvQTaBTE75dkrWdh8SnABXfUc6G4");
+  }
+}
+
+function saveCheckImageToDrive(base64Data, filename) {
+  if (!base64Data) return "";
+  try {
+    const splitBase = base64Data.split(',');
+    const type = splitBase[0].split(';')[0].replace('data:', '');
+    const byteCharacters = Utilities.base64Decode(splitBase[1]);
+    const blob = Utilities.newBlob(byteCharacters, type, filename);
+    const folder = getOrCreateCheckPhotosFolder();
+    const file = folder.createFile(blob);
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    return file.getUrl();
+  } catch (e) {
+    console.error("Save check image error: " + e);
+    return "";
+  }
+}
+
+// เพิ่ม column ที่ขาดหายไปใน sheet (backward compat helper)
+function ensureColumns(sheet, requiredCols) {
+  let headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+  requiredCols.forEach(function(col) {
+    if (headers.indexOf(col) === -1) {
+      sheet.getRange(1, sheet.getLastColumn() + 1).setValue(col);
+      headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+    }
+  });
+}
+
+// ค้น Check_Interval_Shots default จาก Parts_Master
+function lookupPartsMasterCheckInterval(ss, partId) {
+  if (!partId) return 0;
+  const sheet = ss.getSheetByName("Parts_Master");
+  if (!sheet) return 0;
+  const rows = sheet.getDataRange().getValues();
+  if (rows.length <= 1) return 0;
+  const headers = rows[0].map(h => String(h).trim());
+  const pidIdx = headers.indexOf("Part_ID");
+  const ciIdx = headers.indexOf("Check_Interval_Shots");
+  if (pidIdx === -1 || ciIdx === -1) return 0;
+  for (let i = 1; i < rows.length; i++) {
+    if (String(rows[i][pidIdx] || "").trim() === partId) {
+      return parseInt(rows[i][ciIdx]) || 0;
+    }
+  }
+  return 0;
 }
 
 // ==================================================
@@ -105,6 +177,8 @@ function doGet(e) {
       let closedDateCol = getCol("Closed_Date");
       let sorterCol = getCol("Sorter");
       let rejectTargetCol = getCol("Reject_Target");
+      let qcFgApprovedCol = getCol("QC_FG_Approved");
+      let qcNgApprovedCol = getCol("QC_NG_Approved");
 
       if (jobCol === -1 || statCol === -1) return ContentService.createTextOutput(JSON.stringify({status: "success", data: [], summaryData: []})).setMimeType(ContentService.MimeType.JSON);
 
@@ -215,7 +289,9 @@ function doGet(e) {
             closedBy: closedByCol > -1 ? r[closedByCol] : "",
             closedDate: cDate,
             sorter: sorterCol > -1 ? r[sorterCol] : "",
-            rejectTarget: rejectTargetCol > -1 ? r[rejectTargetCol] : ""
+            rejectTarget: rejectTargetCol > -1 ? r[rejectTargetCol] : "",
+            qcFgApproved: qcFgApprovedCol > -1 ? String(r[qcFgApprovedCol] || "").toUpperCase() === "TRUE" : false,
+            qcNgApproved: qcNgApprovedCol > -1 ? String(r[qcNgApprovedCol] || "").toUpperCase() === "TRUE" : false
           });
         }
 
@@ -432,6 +508,139 @@ function doPost(e) {
   }
 
   const action = data.action;
+
+  if (action === "GET_SORTING_PROD_SUMMARY") {
+    try {
+      const sheet = ss.getSheetByName("Production_Data");
+      if (!sheet) {
+        return ContentService.createTextOutput(JSON.stringify({ status: "success", summary: {}, totals: { fg: 0, ng: 0, jobs: 0 } })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      const rows = sheet.getDataRange().getValues();
+      if (rows.length <= 1) {
+        return ContentService.createTextOutput(JSON.stringify({ status: "success", summary: {}, totals: { fg: 0, ng: 0, jobs: 0 } })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      const headers = rows[0].map(h => String(h || "").trim());
+      const getCol = (name) => headers.findIndex(h => h.toLowerCase() === String(name).toLowerCase());
+      const productCol = getCol("Product");
+      const fgCol = getCol("FG");
+      const ngKgCol = getCol("NG_Total");
+      const batchIdCol = getCol("Batch_ID");
+      const timestampCol = getCol("Timestamp");
+
+      if (productCol === -1 || fgCol === -1 || ngKgCol === -1 || batchIdCol === -1 || timestampCol === -1) {
+        return ContentService.createTextOutput(JSON.stringify({ status: "success", summary: {}, totals: { fg: 0, ng: 0, jobs: 0 } })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      const start = String(data.start || "").trim();
+      const end = String(data.end || "").trim();
+      const filterShift = String(data.shift || "All").trim();
+      const filterShiftType = String(data.shiftType || "All").trim();
+      const shiftCol = getCol("Shift");
+      const shiftTypeCol = getCol("Shift_Type");
+
+      // แปลง Timestamp (Date object หรือ Thai locale "d/m/พ.ศ. HH:mm:ss") → yyyy-MM-dd (ค.ศ.)
+      const toCalendarDate = (rawVal) => {
+        if (!rawVal) return "";
+        if (rawVal instanceof Date && !isNaN(rawVal.getTime())) {
+          const formatted = Utilities.formatDate(rawVal, "GMT+7", "yyyy-MM-dd");
+          const y = parseInt(formatted.substring(0, 4)) || 0;
+          if (y > 2500) return (y - 543) + formatted.substring(4);
+          return formatted;
+        }
+        const text = String(rawVal).trim();
+        if (/^\d{4}-\d{2}-\d{2}/.test(text)) {
+          const y = parseInt(text.substring(0, 4)) || 0;
+          if (y > 2500) return (y - 543) + text.substring(4, 10);
+          return text.substring(0, 10);
+        }
+        const datePart = text.split(/[\s,]+/)[0] || "";
+        if (datePart.includes("/")) {
+          const dp = datePart.split("/");
+          if (dp.length === 3) {
+            let year = parseInt(dp[2]) || 0;
+            if (year > 2500) year -= 543;
+            return year + "-" + String(parseInt(dp[1]) || 1).padStart(2, "0") + "-" + String(parseInt(dp[0]) || 1).padStart(2, "0");
+          }
+        }
+        return "";
+      };
+
+      const getWppStrict = (productName) => {
+        const p = String(productName || "");
+        if (p.includes("10A")) return 0.00228;
+        if (p.includes("16A")) return 0.00279;
+        if (p.includes("20A")) return 0.00357;
+        if (p.includes("25/32A")) return 0.005335;
+        return null;
+      };
+
+      const summary = {};
+      let totalFg = 0;
+      let totalNg = 0;
+      let totalJobs = 0;
+      const seenBatchIds = {};
+
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        const batchId = String(row[batchIdCol] || "").trim();
+        if (!batchId || batchId.indexOf("SORT-") !== 0) continue;
+
+        // กันนับซ้ำกรณีมีแถว Batch_ID เดิมซ้ำใน Production_Data
+        if (seenBatchIds[batchId]) continue;
+        seenBatchIds[batchId] = true;
+
+        // ใช้ Timestamp (วันที่อนุมัติ/เขียนลง Production_Data) เป็นตัว filter
+        const targetDateISO = toCalendarDate(row[timestampCol]);
+        if (!targetDateISO) continue;
+        if (start && targetDateISO < start) continue;
+        if (end && targetDateISO > end) continue;
+
+        if (filterShift !== "All" && shiftCol !== -1) {
+          const rowShift = String(row[shiftCol] || "").trim();
+          if (rowShift !== filterShift) continue;
+        }
+        if (filterShiftType !== "All") {
+          const tsRaw = row[timestampCol];
+          let tsHour = -1;
+          if (tsRaw instanceof Date && !isNaN(tsRaw.getTime())) {
+            tsHour = parseInt(Utilities.formatDate(tsRaw, "GMT+7", "HH")) || 0;
+          } else {
+            const tsParts = String(tsRaw || "").match(/(\d{1,2}):(\d{2})/);
+            if (tsParts) tsHour = parseInt(tsParts[1]) || 0;
+          }
+          const derivedType = (tsHour >= 8 && tsHour < 20) ? "Day" : "Night";
+          if (derivedType !== filterShiftType) continue;
+        }
+
+        const model = String(row[productCol] || "").trim();
+        if (!model) continue;
+
+        const wpp = getWppStrict(model);
+        const fg = parseFloat(row[fgCol]) || 0;
+        const ngKg = parseFloat(row[ngKgCol]) || 0;
+        const ng = (ngKg > 0 && wpp) ? Math.round(ngKg / wpp) : 0;
+
+        if (!summary[model]) summary[model] = { fg: 0, ng: 0, jobs: 0 };
+        summary[model].fg += fg;
+        summary[model].ng += ng;
+        summary[model].jobs += 1;
+
+        totalFg += fg;
+        totalNg += ng;
+        totalJobs += 1;
+      }
+
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "success",
+        summary: summary,
+        totals: { fg: totalFg, ng: totalNg, jobs: totalJobs }
+      })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
 
   // --- ส่วนที่ 1: ระบบ Authentication & Admin ---
   if (action === "LOGIN") {
@@ -729,26 +938,85 @@ function doPost(e) {
     const headers = rows[0].map(h => String(h).trim());
     const colIdx = (name) => headers.indexOf(name);
 
+    // เพิ่ม column Check_Interval_Shots ใน Parts_Master ถ้ายังไม่มี (backward compat)
+    if (headers.indexOf("Check_Interval_Shots") === -1) {
+      sheet.getRange(1, sheet.getLastColumn() + 1).setValue("Check_Interval_Shots");
+    }
+
     if (data.mode === "edit" && d.Part_ID) {
       // แก้ไขอะไหล่เดิม
+      const newLife = parseInt(d.Life_Shots) || 0;
+      const newName = d.Part_Name || "";
+      const newCheckInterval = parseInt(d.Check_Interval_Shots) || 0;
+      const freshHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+      const checkCol = freshHeaders.indexOf("Check_Interval_Shots");
       for (let i = 1; i < rows.length; i++) {
         if (String(rows[i][colIdx("Part_ID")]).trim() === d.Part_ID) {
-          sheet.getRange(i + 1, colIdx("Part_Name") + 1).setValue(d.Part_Name || "");
+          sheet.getRange(i + 1, colIdx("Part_Name") + 1).setValue(newName);
           sheet.getRange(i + 1, colIdx("Category") + 1).setValue(d.Category || "");
-          sheet.getRange(i + 1, colIdx("Life_Shots") + 1).setValue(parseInt(d.Life_Shots) || 0);
+          sheet.getRange(i + 1, colIdx("Life_Shots") + 1).setValue(newLife);
           sheet.getRange(i + 1, colIdx("Unit_Cost") + 1).setValue(parseFloat(d.Unit_Cost) || 0);
           sheet.getRange(i + 1, colIdx("Supplier") + 1).setValue(d.Supplier || "");
           sheet.getRange(i + 1, colIdx("Remark") + 1).setValue(d.Remark || "");
+          if (checkCol !== -1) sheet.getRange(i + 1, checkCol + 1).setValue(newCheckInterval);
+          // Sync: อัพเดต Life_Shots + Part_Name + Check_Interval ของ Active installation ทั้งหมดของ Part_ID นี้
+          const instSheet = ss.getSheetByName("Parts_Installation");
+          if (instSheet) {
+            const iRows = instSheet.getDataRange().getValues();
+            if (iRows.length > 1) {
+              const iHdr = iRows[0].map(h => String(h).trim());
+              const iPid = iHdr.indexOf("Part_ID");
+              const iStatus = iHdr.indexOf("Status");
+              const iLife = iHdr.indexOf("Life_Shots");
+              const iName = iHdr.indexOf("Part_Name");
+              const iCheckInterval = iHdr.indexOf("Check_Interval_Shots");
+              if (iPid !== -1 && iLife !== -1) {
+                for (let j = 1; j < iRows.length; j++) {
+                  if (String(iRows[j][iPid] || "").trim() === d.Part_ID
+                      && String(iRows[j][iStatus] || "").trim() === "Active") {
+                    instSheet.getRange(j + 1, iLife + 1).setValue(newLife);
+                    if (iName !== -1) instSheet.getRange(j + 1, iName + 1).setValue(newName);
+                    if (iCheckInterval !== -1 && newCheckInterval > 0) {
+                      instSheet.getRange(j + 1, iCheckInterval + 1).setValue(newCheckInterval);
+                    }
+                  }
+                }
+              }
+            }
+          }
           SpreadsheetApp.flush();
           return ContentService.createTextOutput(JSON.stringify({status: "success", message: "Updated"})).setMimeType(ContentService.MimeType.JSON);
         }
       }
       return ContentService.createTextOutput(JSON.stringify({status: "error", message: "Part_ID not found"})).setMimeType(ContentService.MimeType.JSON);
     } else {
-      // เพิ่มอะไหล่ใหม่ — สร้าง Part_ID อัตโนมัติ
-      const prefix = (d.Category || "PART").substring(0, 3).toUpperCase();
-      const newId = prefix + "-" + String(rows.length).padStart(3, "0");
-      sheet.appendRow([newId, d.Part_Name || "", d.Category || "", parseInt(d.Life_Shots) || 0, parseFloat(d.Unit_Cost) || 0, d.Supplier || "", d.Remark || ""]);
+      // เพิ่มอะไหล่ใหม่ — สร้าง Part_ID จากตัวย่อชื่อ (เช่น "Guide Roller" → "GR-001")
+      const words = (d.Part_Name || "PART").trim().split(/\s+/);
+      const prefix = words.map(function(w) { return w.charAt(0).toUpperCase(); }).join("");
+      const pidCol = colIdx("Part_ID");
+      let maxNum = 0;
+      for (let i = 1; i < rows.length; i++) {
+        const pid = String(rows[i][pidCol] || "");
+        const match = pid.match(new RegExp("^" + prefix + "-(\\d+)$"));
+        if (match) maxNum = Math.max(maxNum, parseInt(match[1]));
+      }
+      const newId = prefix + "-" + String(maxNum + 1).padStart(3, "0");
+      // Build row ตาม header order (รองรับ Check_Interval_Shots)
+      const freshHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+      const rowData = freshHeaders.map(function(h) {
+        switch(h) {
+          case "Part_ID": return newId;
+          case "Part_Name": return d.Part_Name || "";
+          case "Category": return d.Category || "";
+          case "Life_Shots": return parseInt(d.Life_Shots) || 0;
+          case "Unit_Cost": return parseFloat(d.Unit_Cost) || 0;
+          case "Supplier": return d.Supplier || "";
+          case "Remark": return d.Remark || "";
+          case "Check_Interval_Shots": return parseInt(d.Check_Interval_Shots) || 0;
+          default: return "";
+        }
+      });
+      sheet.appendRow(rowData);
       SpreadsheetApp.flush();
       return ContentService.createTextOutput(JSON.stringify({status: "success", message: "Added", partId: newId})).setMimeType(ContentService.MimeType.JSON);
     }
@@ -783,96 +1051,311 @@ function doPost(e) {
       if (filterMachine && obj.Machine !== filterMachine) continue;
       results.push(obj);
     }
-    return ContentService.createTextOutput(JSON.stringify({status: "success", data: results})).setMimeType(ContentService.MimeType.JSON);
+    // ถ้าไม่ระบุ machine filter → คำนวณ machineShots สำหรับ Active records ทั้งหมด (ใช้ใน Parts Master table)
+    let machineShots = null;
+    if (!filterMachine) {
+      const activeMachines = [];
+      results.forEach(function(r) {
+        if (r.Status === "Active" && r.Machine && activeMachines.indexOf(r.Machine) === -1) {
+          activeMachines.push(r.Machine);
+        }
+      });
+      if (activeMachines.length > 0) {
+        machineShots = calcMultiMachineShots(ss, activeMachines);
+      }
+    }
+    const response = {status: "success", data: results};
+    if (machineShots) response.machineShots = machineShots;
+    return ContentService.createTextOutput(JSON.stringify(response)).setMimeType(ContentService.MimeType.JSON);
   }
 
   if (action === "SAVE_PARTS_INSTALLATION") {
     let sheet = ss.getSheetByName("Parts_Installation");
     if (!sheet) {
       sheet = ss.insertSheet("Parts_Installation");
-      sheet.appendRow(["Install_ID", "Machine", "Part_ID", "Part_Name", "Install_Date", "Install_Shot", "Life_Shots", "Status", "Maint_Job_ID", "Recorder", "Replaced_Date"]);
+      sheet.appendRow(["Install_ID", "Machine", "Part_ID", "Part_Name", "Install_Date", "Install_Shot", "Life_Shots", "Status", "Maint_Job_ID", "Recorder", "Replaced_Date", "Carried_Shots", "Carried_Days", "Check_Interval_Shots", "Next_Check_Shot", "Last_Check_Date", "Check_Count"]);
     }
+    // ตรวจสอบว่ามีคอลัมน์ที่จำเป็นหรือยัง (backward compat)
+    ensureColumns(sheet, ["Carried_Shots", "Carried_Days", "Check_Interval_Shots", "Next_Check_Shot", "Last_Check_Date", "Check_Count"]);
+
     const d = data.installation;
     const now = new Date();
 
+    // หา Check_Interval_Shots default: frontend → Parts_Master → 0
+    let checkInterval = parseInt(d.Check_Interval_Shots);
+    if (!checkInterval || checkInterval < 0) {
+      checkInterval = lookupPartsMasterCheckInterval(ss, d.Part_ID);
+    }
+
+    // รับ Install_Date จาก frontend ได้ (format: "yyyy-MM-dd" หรือ "yyyy-MM-dd HH:mm")
+    // ถ้าไม่ส่งมาให้ใช้เวลาปัจจุบัน
+    let installDateFull = String(d.Install_Date || "").trim();
+    if (!installDateFull) {
+      installDateFull = Utilities.formatDate(now, "GMT+7", "yyyy-MM-dd HH:mm");
+    }
+    const installDateOnly = installDateFull.substring(0, 10); // "yyyy-MM-dd"
+
     if (data.mode === "replace" && d.Install_ID) {
-      // เปลี่ยนอะไหล่: ปิดตัวเก่า + สร้างตัวใหม่
+      // เปลี่ยน/ย้ายอะไหล่: ปิดตัวเก่า + คำนวณ carry-over + สร้างตัวใหม่
       const rows = sheet.getDataRange().getValues();
       const headers = rows[0].map(h => String(h).trim());
       const colIdx = (name) => headers.indexOf(name);
+      let oldCarried = 0, oldInstallShot = 0, oldMachine = "";
+      let oldCarriedDays = 0, oldInstallDateStr = "";
       for (let i = 1; i < rows.length; i++) {
         if (String(rows[i][colIdx("Install_ID")]).trim() === d.Install_ID) {
+          oldCarried = parseInt(rows[i][colIdx("Carried_Shots")]) || 0;
+          oldInstallShot = parseInt(rows[i][colIdx("Install_Shot")]) || 0;
+          oldMachine = String(rows[i][colIdx("Machine")] || "").trim();
+          const cdIdx = colIdx("Carried_Days");
+          oldCarriedDays = (cdIdx !== -1) ? (parseInt(rows[i][cdIdx]) || 0) : 0;
+          const oldInstDateRaw = rows[i][colIdx("Install_Date")];
+          if (oldInstDateRaw instanceof Date && !isNaN(oldInstDateRaw.getTime())) {
+            oldInstallDateStr = Utilities.formatDate(oldInstDateRaw, "GMT+7", "yyyy-MM-dd");
+          } else {
+            oldInstallDateStr = String(oldInstDateRaw || "").trim().substring(0, 10);
+          }
           sheet.getRange(i + 1, colIdx("Status") + 1).setValue("Replaced");
-          sheet.getRange(i + 1, colIdx("Replaced_Date") + 1).setValue(Utilities.formatDate(now, "GMT+7", "yyyy-MM-dd"));
+          sheet.getRange(i + 1, colIdx("Replaced_Date") + 1).setValue(installDateOnly);
           break;
         }
       }
-      // สร้าง Installation ใหม่
+      // คำนวณ Shot ที่ใช้ไปบนเครื่องเก่า (ถึงวันที่ถอดอะไหล่) แล้ว carry ไปยังรายการใหม่
+      const oldMachineShots = oldMachine ? calcMachineShots(ss, oldMachine, "2020-01-01", installDateOnly) : 0;
+      const shotsOnOld = Math.max(0, oldMachineShots - oldInstallShot);
+      const newCarried = oldCarried + shotsOnOld;
+      // คำนวณจำนวนวันที่ใช้บนเครื่องเก่า แล้ว carry ไปยังรายการใหม่
+      const daysOnOld = (oldInstallDateStr && installDateOnly)
+        ? Math.max(0, daysBetween(oldInstallDateStr, installDateOnly))
+        : 0;
+      const newCarriedDays = oldCarriedDays + daysOnOld;
+
       const newId = "INS-" + Utilities.formatDate(now, "GMT+7", "yyMMdd") + "-" + Math.random().toString(36).substr(2, 4).toUpperCase();
-      sheet.appendRow([newId, d.Machine, d.Part_ID, d.Part_Name || "", Utilities.formatDate(now, "GMT+7", "yyyy-MM-dd"), parseInt(d.Current_Shot) || 0, parseInt(d.Life_Shots) || 0, "Active", d.Maint_Job_ID || "", d.Recorder || "", ""]);
+      // คำนวณ Install_Shot ของเครื่องใหม่ ณ วันที่ติดตั้ง (shot สะสมถึงวันนั้น)
+      const newInstallShot = calcMachineShots(ss, d.Machine, "2020-01-01", installDateOnly);
+      // Next_Check_Shot = shot สะสมตัวอะไหล่ ณ ปัจจุบัน + interval
+      const newNextCheckShot = (checkInterval > 0) ? (newCarried + checkInterval) : 0;
+      // appendRow ตาม header order (re-read headers เผื่อเพิ่ม columns ใหม่)
+      const newHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+      const rowData = newHeaders.map(function(h) {
+        switch(h) {
+          case "Install_ID": return newId;
+          case "Machine": return d.Machine;
+          case "Part_ID": return d.Part_ID;
+          case "Part_Name": return d.Part_Name || "";
+          case "Install_Date": return installDateFull;
+          case "Install_Shot": return newInstallShot;
+          case "Life_Shots": return parseInt(d.Life_Shots) || 0;
+          case "Status": return "Active";
+          case "Maint_Job_ID": return d.Maint_Job_ID || "";
+          case "Recorder": return d.Recorder || "";
+          case "Replaced_Date": return "";
+          case "Carried_Shots": return newCarried;
+          case "Carried_Days": return newCarriedDays;
+          case "Check_Interval_Shots": return checkInterval;
+          case "Next_Check_Shot": return newNextCheckShot;
+          case "Last_Check_Date": return "";
+          case "Check_Count": return 0;
+          default: return "";
+        }
+      });
+      sheet.appendRow(rowData);
       SpreadsheetApp.flush();
-      return ContentService.createTextOutput(JSON.stringify({status: "success", message: "Replaced", installId: newId})).setMimeType(ContentService.MimeType.JSON);
+      return ContentService.createTextOutput(JSON.stringify({status: "success", message: "Replaced", installId: newId, carriedShots: newCarried, carriedDays: newCarriedDays, installShot: newInstallShot, checkInterval: checkInterval, nextCheckShot: newNextCheckShot})).setMimeType(ContentService.MimeType.JSON);
     } else {
-      // ติดตั้งอะไหล่ใหม่
+      // ติดตั้งอะไหล่ใหม่ (Carried_Shots = 0, Carried_Days = 0)
       const newId = "INS-" + Utilities.formatDate(now, "GMT+7", "yyMMdd") + "-" + Math.random().toString(36).substr(2, 4).toUpperCase();
-      sheet.appendRow([newId, d.Machine, d.Part_ID, d.Part_Name || "", Utilities.formatDate(now, "GMT+7", "yyyy-MM-dd"), parseInt(d.Current_Shot) || 0, parseInt(d.Life_Shots) || 0, "Active", d.Maint_Job_ID || "", d.Recorder || "", ""]);
+      const hdr = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+      // คำนวณ Install_Shot ณ วันที่ติดตั้ง (shot สะสมถึงวันนั้น)
+      const newInstallShot = calcMachineShots(ss, d.Machine, "2020-01-01", installDateOnly);
+      const newNextCheckShot = (checkInterval > 0) ? checkInterval : 0;
+      const rowData = hdr.map(function(h) {
+        switch(h) {
+          case "Install_ID": return newId;
+          case "Machine": return d.Machine;
+          case "Part_ID": return d.Part_ID;
+          case "Part_Name": return d.Part_Name || "";
+          case "Install_Date": return installDateFull;
+          case "Install_Shot": return newInstallShot;
+          case "Life_Shots": return parseInt(d.Life_Shots) || 0;
+          case "Status": return "Active";
+          case "Maint_Job_ID": return d.Maint_Job_ID || "";
+          case "Recorder": return d.Recorder || "";
+          case "Replaced_Date": return "";
+          case "Carried_Shots": return 0;
+          case "Carried_Days": return 0;
+          case "Check_Interval_Shots": return checkInterval;
+          case "Next_Check_Shot": return newNextCheckShot;
+          case "Last_Check_Date": return "";
+          case "Check_Count": return 0;
+          default: return "";
+        }
+      });
+      sheet.appendRow(rowData);
       SpreadsheetApp.flush();
-      return ContentService.createTextOutput(JSON.stringify({status: "success", message: "Installed", installId: newId})).setMimeType(ContentService.MimeType.JSON);
+      return ContentService.createTextOutput(JSON.stringify({status: "success", message: "Installed", installId: newId, installShot: newInstallShot, checkInterval: checkInterval, nextCheckShot: newNextCheckShot})).setMimeType(ContentService.MimeType.JSON);
     }
   }
 
   if (action === "GET_MACHINE_SHOTS") {
-    // คำนวณ Shot สะสมของเครื่องตั้งแต่วันที่ระบุ (FG + NG pcs)
     const machine = data.machine;
     const sinceDate = data.sinceDate || "2020-01-01";
-    let totalShots = 0;
-    const prodSheet = ss.getSheetByName("Production_Data");
-    if (prodSheet && prodSheet.getLastRow() > 1) {
-      const pRows = prodSheet.getDataRange().getValues();
-      const pH = pRows[0].map(h => String(h).trim().toLowerCase());
-      const pDateIdx = pH.indexOf("date");
-      const pMachIdx = pH.indexOf("machine");
-      const pFgIdx = pH.indexOf("fg");
-      const pNgIdx = pH.indexOf("ng_total");
-      const pProdIdx = pH.indexOf("product");
-      if (pDateIdx !== -1 && pMachIdx !== -1 && pFgIdx !== -1) {
-        for (let i = 1; i < pRows.length; i++) {
-          const pMach = String(pRows[i][pMachIdx] || "").trim();
-          if (pMach !== machine) continue;
-          const pDateRaw = pRows[i][pDateIdx];
-          let pDateStr = "";
-          if (pDateRaw instanceof Date && !isNaN(pDateRaw.getTime())) {
-            pDateStr = Utilities.formatDate(pDateRaw, "GMT+7", "yyyy-MM-dd");
-          } else {
-            pDateStr = String(pDateRaw || "").trim().substring(0, 10);
-          }
-          if (pDateStr < sinceDate) continue;
-          const fg = parseInt(pRows[i][pFgIdx]) || 0;
-          const ngKg = parseFloat(pRows[i][pNgIdx]) || 0;
-          const prod = String(pRows[i][pProdIdx] || "");
-          const ngPcs = getPcsFromKg(prod, ngKg);
-          totalShots += (fg + ngPcs);
-        }
-      }
-    }
+    const totalShots = calcMachineShots(ss, machine, sinceDate);
     return ContentService.createTextOutput(JSON.stringify({status: "success", machine: machine, totalShots: totalShots})).setMimeType(ContentService.MimeType.JSON);
   }
 
   if (action === "UPDATE_PARTS_LIFE") {
-    // ปรับอายุการใช้งาน (Life_Shots) ของอะไหล่ที่ติดตั้งอยู่
+    // ปรับอายุการใช้งาน (Life_Shots) — sync ทั้ง Parts_Installation + Parts_Master
     let sheet = ss.getSheetByName("Parts_Installation");
     if (!sheet) return ContentService.createTextOutput(JSON.stringify({status: "error", message: "Sheet not found"})).setMimeType(ContentService.MimeType.JSON);
+    const newLife = parseInt(data.lifeShots) || 0;
     const rows = sheet.getDataRange().getValues();
     const headers = rows[0].map(h => String(h).trim());
     const colIdx = (name) => headers.indexOf(name);
+    let targetPartId = "";
+    let targetRowFound = false;
+    // 1) หา row ที่ Install_ID ตรง → เก็บ Part_ID + อัพเดต Life_Shots
     for (let i = 1; i < rows.length; i++) {
       if (String(rows[i][colIdx("Install_ID")]).trim() === data.installId) {
-        sheet.getRange(i + 1, colIdx("Life_Shots") + 1).setValue(parseInt(data.lifeShots) || 0);
-        SpreadsheetApp.flush();
-        return ContentService.createTextOutput(JSON.stringify({status: "success", message: "Life updated"})).setMimeType(ContentService.MimeType.JSON);
+        sheet.getRange(i + 1, colIdx("Life_Shots") + 1).setValue(newLife);
+        targetPartId = String(rows[i][colIdx("Part_ID")] || "").trim();
+        targetRowFound = true;
+        break;
       }
     }
-    return ContentService.createTextOutput(JSON.stringify({status: "error", message: "Install_ID not found"})).setMimeType(ContentService.MimeType.JSON);
+    if (!targetRowFound) {
+      return ContentService.createTextOutput(JSON.stringify({status: "error", message: "Install_ID not found"})).setMimeType(ContentService.MimeType.JSON);
+    }
+    // 2) Sync: อัพเดต Active installation อื่นของ Part_ID เดียวกัน (กรณีมีหลายตัว)
+    if (targetPartId) {
+      const statusIdx = colIdx("Status");
+      const partIdIdx = colIdx("Part_ID");
+      const lifeIdx = colIdx("Life_Shots");
+      for (let i = 1; i < rows.length; i++) {
+        if (String(rows[i][partIdIdx] || "").trim() === targetPartId
+            && String(rows[i][statusIdx] || "").trim() === "Active"
+            && String(rows[i][colIdx("Install_ID")]).trim() !== data.installId) {
+          sheet.getRange(i + 1, lifeIdx + 1).setValue(newLife);
+        }
+      }
+      // 3) Sync: อัพเดต Parts_Master.Life_Shots ของ Part_ID นั้นด้วย
+      const masterSheet = ss.getSheetByName("Parts_Master");
+      if (masterSheet) {
+        const mRows = masterSheet.getDataRange().getValues();
+        const mHdr = mRows[0].map(h => String(h).trim());
+        const mPidIdx = mHdr.indexOf("Part_ID");
+        const mLifeIdx = mHdr.indexOf("Life_Shots");
+        if (mPidIdx !== -1 && mLifeIdx !== -1) {
+          for (let i = 1; i < mRows.length; i++) {
+            if (String(mRows[i][mPidIdx] || "").trim() === targetPartId) {
+              masterSheet.getRange(i + 1, mLifeIdx + 1).setValue(newLife);
+              break;
+            }
+          }
+        }
+      }
+    }
+    SpreadsheetApp.flush();
+    return ContentService.createTextOutput(JSON.stringify({status: "success", message: "Life updated", partId: targetPartId, lifeShots: newLife})).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  if (action === "SAVE_PARTS_CHECK") {
+    // บันทึกการตรวจเช็คอะไหล่ + upload รูป + อัพเดต Parts_Installation
+    let sheet = ss.getSheetByName("Parts_Checks");
+    if (!sheet) {
+      sheet = ss.insertSheet("Parts_Checks");
+      sheet.appendRow(["Check_ID", "Install_ID", "Part_ID", "Part_Name", "Machine", "Check_Date", "Machine_Shot", "Actual_Part_Shot", "Result", "Note", "Photo_URLs", "Next_Check_Shot", "Recorder"]);
+    }
+    ensureColumns(sheet, ["Check_ID", "Install_ID", "Part_ID", "Part_Name", "Machine", "Check_Date", "Machine_Shot", "Actual_Part_Shot", "Result", "Note", "Photo_URLs", "Next_Check_Shot", "Recorder"]);
+
+    const c = data.check || {};
+    const now = new Date();
+    let checkDate = String(c.Check_Date || "").trim();
+    if (!checkDate) checkDate = Utilities.formatDate(now, "GMT+7", "yyyy-MM-dd HH:mm");
+
+    // 1) Upload รูปทีละไฟล์ (รับ array ของ base64)
+    const urls = [];
+    if (Array.isArray(data.photos)) {
+      for (let idx = 0; idx < data.photos.length; idx++) {
+        const b64 = data.photos[idx];
+        if (!b64) continue;
+        const fname = "CHK_" + (c.Install_ID || "NA") + "_" + Utilities.formatDate(now, "GMT+7", "yyMMdd_HHmmss") + "_" + (idx + 1) + ".jpg";
+        const url = saveCheckImageToDrive(b64, fname);
+        if (url) urls.push(url);
+      }
+    }
+
+    // 2) Append row ใน Parts_Checks
+    const checkId = "CHK-" + Utilities.formatDate(now, "GMT+7", "yyMMdd") + "-" + Math.random().toString(36).substr(2, 4).toUpperCase();
+    const hdr = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+    const rowData = hdr.map(function(h) {
+      switch(h) {
+        case "Check_ID": return checkId;
+        case "Install_ID": return c.Install_ID || "";
+        case "Part_ID": return c.Part_ID || "";
+        case "Part_Name": return c.Part_Name || "";
+        case "Machine": return c.Machine || "";
+        case "Check_Date": return checkDate;
+        case "Machine_Shot": return parseInt(c.Machine_Shot) || 0;
+        case "Actual_Part_Shot": return parseInt(c.Actual_Part_Shot) || 0;
+        case "Result": return c.Result || "Passed";
+        case "Note": return c.Note || "";
+        case "Photo_URLs": return urls.join(",");
+        case "Next_Check_Shot": return parseInt(c.Next_Check_Shot) || 0;
+        case "Recorder": return c.Recorder || "";
+        default: return "";
+      }
+    });
+    sheet.appendRow(rowData);
+
+    // 3) อัพเดต Parts_Installation: Next_Check_Shot, Last_Check_Date, Check_Count
+    const instSheet = ss.getSheetByName("Parts_Installation");
+    if (instSheet && c.Install_ID) {
+      ensureColumns(instSheet, ["Check_Interval_Shots", "Next_Check_Shot", "Last_Check_Date", "Check_Count"]);
+      const iRows = instSheet.getDataRange().getValues();
+      const iHdr = iRows[0].map(h => String(h).trim());
+      const iIdIdx = iHdr.indexOf("Install_ID");
+      const iNextIdx = iHdr.indexOf("Next_Check_Shot");
+      const iLastIdx = iHdr.indexOf("Last_Check_Date");
+      const iCountIdx = iHdr.indexOf("Check_Count");
+      for (let i = 1; i < iRows.length; i++) {
+        if (String(iRows[i][iIdIdx] || "").trim() === c.Install_ID) {
+          if (iNextIdx !== -1) instSheet.getRange(i + 1, iNextIdx + 1).setValue(parseInt(c.Next_Check_Shot) || 0);
+          if (iLastIdx !== -1) instSheet.getRange(i + 1, iLastIdx + 1).setValue(checkDate.substring(0, 10));
+          if (iCountIdx !== -1) instSheet.getRange(i + 1, iCountIdx + 1).setValue((parseInt(iRows[i][iCountIdx]) || 0) + 1);
+          break;
+        }
+      }
+    }
+    SpreadsheetApp.flush();
+    return ContentService.createTextOutput(JSON.stringify({status: "success", message: "Check saved", checkId: checkId, photoUrls: urls})).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  if (action === "GET_PARTS_CHECKS") {
+    const sheet = ss.getSheetByName("Parts_Checks");
+    if (!sheet) return ContentService.createTextOutput(JSON.stringify({status: "success", data: []})).setMimeType(ContentService.MimeType.JSON);
+    const rows = sheet.getDataRange().getValues();
+    if (rows.length <= 1) return ContentService.createTextOutput(JSON.stringify({status: "success", data: []})).setMimeType(ContentService.MimeType.JSON);
+    const headers = rows[0].map(h => String(h).trim());
+    const filterInstall = data.installId || "";
+    const filterPartId = data.partId || "";
+    const filterMachine = data.machine || "";
+    const results = [];
+    for (let i = 1; i < rows.length; i++) {
+      const obj = {};
+      headers.forEach((h, idx) => { obj[h] = rows[i][idx] !== undefined ? rows[i][idx] : ""; });
+      if (!obj.Check_ID) continue;
+      if (filterPartId) {
+        if (obj.Part_ID !== filterPartId) continue;
+      } else if (filterInstall) {
+        if (obj.Install_ID !== filterInstall) continue;
+      }
+      if (filterMachine && obj.Machine !== filterMachine) continue;
+      results.push(obj);
+    }
+    // Sort by Check_Date desc
+    results.sort(function(a, b) { return String(b.Check_Date).localeCompare(String(a.Check_Date)); });
+    return ContentService.createTextOutput(JSON.stringify({status: "success", data: results})).setMimeType(ContentService.MimeType.JSON);
   }
 
   if (action === "SAVE_RTV") {
@@ -914,6 +1397,9 @@ function doPost(e) {
               sheet = ss.insertSheet("Sorting_Data");
               // จัดเรียงหัวคอลัมน์ให้ครบ 14 คอลัมน์ (มี Sorter เป็นคนที่ 2 และ Closed_By เป็น QC)
               sheet.appendRow(["Timestamp", "Job_ID", "Date", "Product", "Symptom", "Qty", "Remark", "Recorder", "Status", "Closed_By", "Closed_Date", "FG_Qty", "NG_Qty", "Sorter"]);
+              // ตั้ง format คอลัมน์ Date (C) และ Closed_Date (K) ให้แสดงเวลาแบบ 24 ชม.
+              sheet.getRange("C:C").setNumberFormat("yyyy-MM-dd HH:mm");
+              sheet.getRange("K:K").setNumberFormat("yyyy-MM-dd HH:mm");
           }
 
           const now = new Date();
@@ -924,6 +1410,9 @@ function doPost(e) {
 
           // 1. ผู้แจ้ง (Recorder) - เติมช่องให้ครบ 14 ช่องเพื่อป้องกันข้อมูลเหลื่อม
           sheet.appendRow([now.toLocaleString('th-TH'), newJobId, finalDate, sortData.product, sortData.symptom, sortData.qty, sortData.remark, sortData.recorder, "Pending", "", "", "", "", ""]);
+          // บังคับ format คอลัมน์ Date ให้แสดง 24 ชม. ป้องกัน Google Sheets แปลงเป็น 12 ชม. (เช่น 14:00 → 2:00)
+          const newRow = sheet.getLastRow();
+          sheet.getRange(newRow, 3).setNumberFormat("yyyy-MM-dd HH:mm");
           SpreadsheetApp.flush();
           logUserAction(sortData.recorder, "System", "SAVE_SORTING", `บันทึกงานรอ Sort ${sortData.product}`);
           return ContentService.createTextOutput(JSON.stringify({status: "success", message: "บันทึกสำเร็จ", jobId: newJobId})).setMimeType(ContentService.MimeType.JSON);
@@ -959,6 +1448,8 @@ function doPost(e) {
           if (foundRow > -1) {
               const sortData = data.data;
               sheet.getRange(foundRow, dateCol).setValue(sortData.date);
+              // บังคับ format คอลัมน์ Date ให้แสดง 24 ชม. ป้องกัน Google Sheets แปลงเป็น 12 ชม.
+              sheet.getRange(foundRow, dateCol).setNumberFormat("yyyy-MM-dd HH:mm");
               sheet.getRange(foundRow, prodCol).setValue(sortData.product);
               sheet.getRange(foundRow, sympCol).setValue(sortData.symptom);
               sheet.getRange(foundRow, qtyCol).setValue(sortData.qty);
@@ -1003,6 +1494,12 @@ function doPost(e) {
           let rejectTargetColIdx = getCol("Reject_Target");
           if (rejectTargetColIdx === -1) { rejectTargetColIdx = headers.length; sheet.getRange(1, rejectTargetColIdx + 1).setValue("Reject_Target"); headers.push("Reject_Target"); }
 
+          let qcFgApprovedColIdx = getCol("QC_FG_Approved");
+          if (qcFgApprovedColIdx === -1) { qcFgApprovedColIdx = headers.length; sheet.getRange(1, qcFgApprovedColIdx + 1).setValue("QC_FG_Approved"); headers.push("QC_FG_Approved"); }
+
+          let qcNgApprovedColIdx = getCol("QC_NG_Approved");
+          if (qcNgApprovedColIdx === -1) { qcNgApprovedColIdx = headers.length; sheet.getRange(1, qcNgApprovedColIdx + 1).setValue("QC_NG_Approved"); headers.push("QC_NG_Approved"); }
+
           let jobCol = getCol("Job_ID");
           let statCol = getCol("Status") + 1;
           let remCol = getCol("Remark") + 1;
@@ -1014,6 +1511,8 @@ function doPost(e) {
           let closedDateCol = closedDateColIdx + 1;
           let sorterCol = sorterColIdx + 1;
           let rejectTargetCol = rejectTargetColIdx + 1;
+          let qcFgApprovedCol = qcFgApprovedColIdx + 1;
+          let qcNgApprovedCol = qcNgApprovedColIdx + 1;
 
           let foundRow = -1;
           for (let i = 1; i < rows.length; i++) { 
@@ -1037,26 +1536,58 @@ function doPost(e) {
               const cellUpdates = []; // เก็บ {row, col, value} แล้วเขียนรวมทีเดียว
               const queueWrite = (row, col, value) => cellUpdates.push({row, col, value});
 
-              queueWrite(foundRow, statCol, data.status);
+              const isPartialApprove = !!data.partialApprove;
+              const approveTargets = Array.isArray(data.approveTargets) ? data.approveTargets : [];
+              let finalStatus = data.status;
 
               if (data.status === "Wait QC") {
-                  // 2. ผู้คัด (Sorter) คัดเสร็จ ส่งยอดให้ QC
-                  if (data.fgQty) queueWrite(foundRow, fgCol, data.fgQty);
-                  if (data.ngQty) queueWrite(foundRow, ngCol, data.ngQty);
-                  queueWrite(foundRow, sorterCol, data.closedBy);
-                  queueWrite(foundRow, closedDateCol, now.toLocaleString('th-TH'));
-                  queueWrite(foundRow, rejectTargetCol, "");
+                  if (isPartialApprove) {
+                      // QC อนุมัติบางส่วน: งานยังคงอยู่ Wait QC
+                      const oldFgApproved = String(rows[foundRow - 1][qcFgApprovedColIdx] || "").toUpperCase() === "TRUE";
+                      const oldNgApproved = String(rows[foundRow - 1][qcNgApprovedColIdx] || "").toUpperCase() === "TRUE";
+                      const newFgApproved = oldFgApproved || approveTargets.indexOf("FG") > -1;
+                      const newNgApproved = oldNgApproved || approveTargets.indexOf("NG") > -1;
 
-                  // Batch write ทั้งหมดในครั้งเดียว
-                  cellUpdates.forEach(u => sheet.getRange(u.row, u.col).setValue(u.value));
-                  SpreadsheetApp.flush();
+                      queueWrite(foundRow, qcFgApprovedCol, newFgApproved);
+                      queueWrite(foundRow, qcNgApprovedCol, newNgApproved);
+                      queueWrite(foundRow, closedByCol, data.closedBy || "");
+                      queueWrite(foundRow, closedDateCol, now.toLocaleString('th-TH'));
+                      queueWrite(foundRow, rejectTargetCol, "");
 
-                  logUserAction(data.closedBy, "System", "SUBMIT_QC", `ส่งงาน ${data.jobId} ให้ QC ตรวจ`);
+                      // ถ้าอนุมัติครบทั้ง FG และ NG แล้ว ให้ปิดงานทันที
+                      if (newFgApproved && newNgApproved) {
+                          finalStatus = "Completed";
+                      } else {
+                          finalStatus = "Wait QC";
+                          queueWrite(foundRow, statCol, finalStatus);
+                          cellUpdates.forEach(u => sheet.getRange(u.row, u.col).setValue(u.value));
+                          SpreadsheetApp.flush();
+                          logUserAction(data.closedBy, "System", "QC_PARTIAL_APPROVE", `QC อนุมัติบางส่วนงาน: ${data.jobId} (${approveTargets.join(",")})`);
+                      }
+                  } else {
+                      // 2. ผู้คัด (Sorter) คัดเสร็จ ส่งยอดให้ QC
+                      queueWrite(foundRow, statCol, "Wait QC");
+                      if (data.fgQty) queueWrite(foundRow, fgCol, data.fgQty);
+                      if (data.ngQty) queueWrite(foundRow, ngCol, data.ngQty);
+                      queueWrite(foundRow, sorterCol, data.closedBy);
+                      queueWrite(foundRow, closedDateCol, now.toLocaleString('th-TH'));
+                      queueWrite(foundRow, rejectTargetCol, "");
+                      queueWrite(foundRow, qcFgApprovedCol, false);
+                      queueWrite(foundRow, qcNgApprovedCol, false);
+
+                      // Batch write ทั้งหมดในครั้งเดียว
+                      cellUpdates.forEach(u => sheet.getRange(u.row, u.col).setValue(u.value));
+                      SpreadsheetApp.flush();
+                      logUserAction(data.closedBy, "System", "SUBMIT_QC", `ส่งงาน ${data.jobId} ให้ QC ตรวจ`);
+                  }
               }
-              else if (data.status === "Completed") {
+              if (finalStatus === "Completed") {
                   // 3. QC อนุมัติผ่าน (เก็บชื่อ QC ลงคอลัมน์ Closed_By)
+                  queueWrite(foundRow, statCol, "Completed");
                   queueWrite(foundRow, closedByCol, data.closedBy);
                   queueWrite(foundRow, closedDateCol, now.toLocaleString('th-TH'));
+                  queueWrite(foundRow, qcFgApprovedCol, true);
+                  queueWrite(foundRow, qcNgApprovedCol, true);
 
                   // Batch write Sorting_Data ก่อน — ให้ QC เห็นผลทันที
                   cellUpdates.forEach(u => sheet.getRange(u.row, u.col).setValue(u.value));
@@ -1119,7 +1650,6 @@ function doPost(e) {
                       let hourNum = 0;
                       if (sortDateRaw instanceof Date && !isNaN(sortDateRaw.getTime())) {
                           hourNum = parseInt(Utilities.formatDate(sortDateRaw, "GMT+7", "HH")) || 0;
-                          // ตัดวัน 08:00 — ก่อน 08:00 นับเป็นวันก่อนหน้า
                           let shiftD = new Date(sortDateRaw.getTime());
                           if (hourNum < 8) shiftD.setDate(shiftD.getDate() - 1);
                           dateStr = Utilities.formatDate(shiftD, "GMT+7", "yyyy-MM-dd");
@@ -1128,7 +1658,6 @@ function doPost(e) {
                           dateStr = dateParts[0] || Utilities.formatDate(now, "GMT+7", "yyyy-MM-dd");
                           const rawTime = dateParts[1] || "";
                           hourNum = parseInt(rawTime.split(":")[0]) || 0;
-                          // ตัดวัน 08:00
                           if (hourNum < 8 && rawTime) {
                               const tmpD = new Date(dateStr + "T00:00:00");
                               tmpD.setDate(tmpD.getDate() - 1);
@@ -1150,8 +1679,9 @@ function doPost(e) {
                       try {
                           let prodSheet = ss.getSheetByName("Production_Data");
                           if (prodSheet && prodSheet.getLastRow() > 1) {
-                              const prodRows = prodSheet.getDataRange().getValues();
-                              const prodHeaders = prodRows[0].map(h => h.toString().trim().toLowerCase());
+                              const lastRow = prodSheet.getLastRow();
+                              const totalCols = prodSheet.getLastColumn();
+                              const prodHeaders = prodSheet.getRange(1, 1, 1, totalCols).getValues()[0].map(h => h.toString().trim().toLowerCase());
                               const pDateIdx = prodHeaders.indexOf("date");
                               const pMachIdx = prodHeaders.indexOf("machine");
                               const pShiftIdx = prodHeaders.indexOf("shift");
@@ -1165,14 +1695,29 @@ function doPost(e) {
                                   return String(val || "").trim();
                               };
 
-                              if (pDateIdx !== -1 && pMachIdx !== -1 && pShiftIdx !== -1) {
-                                  // ลูปเดียว: หาทั้ง exact match (Machine+Date+Hour) และ fallback (Machine+Date)
-                                  for (let p = prodRows.length - 1; p >= 1; p--) {
-                                      const pDate = formatProdDate(prodRows[p][pDateIdx]);
+                              // ขั้น 1: อ่านเฉพาะคอลัมน์ Date เพื่อหาแถวเป้าหมาย
+                              let rowStart = -1, rowEnd = -1;
+                              if (pDateIdx !== -1) {
+                                  const dateCol = prodSheet.getRange(2, pDateIdx + 1, lastRow - 1, 1).getValues();
+                                  for (let i = dateCol.length - 1; i >= 0; i--) {
+                                      const d = formatProdDate(dateCol[i][0]);
+                                      if (d === dateStr) {
+                                          if (rowEnd === -1) rowEnd = i;
+                                          rowStart = i;
+                                      } else if (rowEnd !== -1 && d < dateStr) {
+                                          break;
+                                      }
+                                  }
+                              }
+
+                              // ขั้น 2: อ่านเฉพาะแถวที่ตรงวันที่ ทุกคอลัมน์
+                              if (rowStart !== -1 && pMachIdx !== -1 && pShiftIdx !== -1) {
+                                  const count = rowEnd - rowStart + 1;
+                                  const prodRows = prodSheet.getRange(rowStart + 2, 1, count, totalCols).getValues();
+                                  for (let p = prodRows.length - 1; p >= 0; p--) {
                                       const pMach = String(prodRows[p][pMachIdx] || "").trim();
                                       const pShift = String(prodRows[p][pShiftIdx] || "").trim();
-                                      if (pDate === dateStr && pMach === baseMachine && (pShift === "A" || pShift === "B")) {
-                                          // เก็บ fallback ไว้เผื่อ exact match ไม่เจอ
+                                      if (pMach === baseMachine && (pShift === "A" || pShift === "B")) {
                                           if (fallbackShift === "-") fallbackShift = pShift;
                                           if (pHourIdx !== -1) {
                                               const pHour = String(prodRows[p][pHourIdx] || "").trim();
@@ -1194,9 +1739,10 @@ function doPost(e) {
                                           }
                                       }
                                   }
-                                  // ใช้ fallback ถ้า exact match ไม่เจอ
                                   if (matchedShift === "-") matchedShift = fallbackShift;
                               }
+                              // fallback สุดท้าย: ใช้เวลาตัดสินกะ
+                              if (matchedShift === "-") matchedShift = shiftType === "Day" ? "A" : "B";
 
                               // === เขียน/อัปเดต Production_Data — รองรับ Recall ===
                               syncHeaders(prodSheet);
@@ -1217,11 +1763,10 @@ function doPost(e) {
                                   }
                               }
 
-                              if (ngKg > 0) {
-                                  const ngDetails = [{ type: symptom, qty: parseFloat(ngKg.toFixed(4)), unit: "kg" }];
+                              if (ngKg > 0 || fgPcs !== 0) {
+                                  const ngDetails = ngKg > 0 ? [{ type: symptom, qty: parseFloat(ngKg.toFixed(4)), unit: "kg" }] : [];
 
                                   if (existingProdRow > 0) {
-                                      // === Recall: อัปเดตแถวเดิมแทนการ append ===
                                       const updateCell = (colName, value) => {
                                           const idx = getProdCol(colName);
                                           if (idx !== -1) prodSheet.getRange(existingProdRow, idx + 1).setValue(value);
@@ -1238,7 +1783,6 @@ function doPost(e) {
                                       updateCell("NG_Details_JSON", JSON.stringify(ngDetails));
                                       updateCell("Shift_Type", shiftType);
                                   } else {
-                                      // === งานปกติ: append แถวใหม่ ===
                                       const newRow = new Array(freshHeaders.length).fill("");
                                       const mapData = (colName, value) => { const idx = getProdCol(colName); if (idx !== -1) newRow[idx] = value; };
 
@@ -1258,7 +1802,6 @@ function doPost(e) {
                                       prodSheet.appendRow(newRow);
                                   }
                               } else if (existingProdRow > 0) {
-                                  // Recall แล้วคัดใหม่ได้ NG = 0 → ลบแถวเดิมออกจาก Production_Data
                                   prodSheet.deleteRow(existingProdRow);
                               }
                           }
@@ -1271,6 +1814,9 @@ function doPost(e) {
               }
               else if (data.status === "Rejected") {
                   // 3. QC ตีกลับ
+                  queueWrite(foundRow, statCol, data.status);
+                  queueWrite(foundRow, qcFgApprovedCol, false);
+                  queueWrite(foundRow, qcNgApprovedCol, false);
                   let oldRemark = sheet.getRange(foundRow, remCol).getValue();
                   let rejectNote = `[QC ${data.closedBy} ตีกลับ ${data.rejectTarget}: ${data.rejectReason}]`;
                   queueWrite(foundRow, remCol, `${rejectNote} | ${oldRemark}`);
@@ -1624,6 +2170,796 @@ function doPost(e) {
     return ContentService.createTextOutput(JSON.stringify({status: "success", countId: countId, saved: newRows.length})).setMimeType(ContentService.MimeType.JSON);
   }
 
+  // === 📬 Inbox: รวบรวมงานค้างจากหลาย sheet ส่งให้ frontend แสดงแบบ Email ===
+  if (action === "GET_INBOX") {
+    const role = data.role || "";
+    const userName = data.userName || "";
+    const todayISO = Utilities.formatDate(new Date(), "GMT+7", "yyyy-MM-dd");
+    const result = { maintenance: [], partsCheck: [], partsNearEnd: [], sortingWaitQC: [], pmTasks: [] };
+
+    // 1) งานซ่อมค้าง (Maintenance_Data: End_Time ว่าง)
+    try {
+      const mSheet = ss.getSheetByName("Maintenance_Data");
+      if (mSheet && mSheet.getLastRow() > 1) {
+        const mRows = mSheet.getDataRange().getValues();
+        const mH = mRows[0].map(h => String(h).trim());
+        const mi = (n) => mH.indexOf(n);
+        for (let i = 1; i < mRows.length; i++) {
+          const endTime = String(mRows[i][mi("End_Time")] || "").trim();
+          if (endTime && endTime !== "-") continue;
+          const dateRaw = mRows[i][mi("Date")];
+          let dateStr = "";
+          if (dateRaw instanceof Date) dateStr = Utilities.formatDate(dateRaw, "GMT+7", "yyyy-MM-dd");
+          else dateStr = String(dateRaw || "").trim().substring(0, 10);
+          const daysAgo = dateStr ? daysBetween(dateStr, todayISO) : 0;
+          result.maintenance.push({
+            jobId: String(mRows[i][mi("Job_ID")] || ""),
+            machine: String(mRows[i][mi("Machine")] || ""),
+            issueType: String(mRows[i][mi("Issue_Type")] || ""),
+            remark: String(mRows[i][mi("Remark")] || ""),
+            recorder: String(mRows[i][mi("Recorder")] || ""),
+            date: dateStr,
+            startTime: (mRows[i][mi("Start_Time")] instanceof Date) ? Utilities.formatDate(mRows[i][mi("Start_Time")], "GMT+7", "HH:mm") : String(mRows[i][mi("Start_Time")] || ""),
+            daysAgo: daysAgo
+          });
+        }
+      }
+    } catch (e) { console.error("Inbox maint err: " + e); }
+
+    // 2) อะไหล่ถึงรอบเช็ค + ใกล้หมดอายุ (Parts_Installation: Active only)
+    try {
+      const pSheet = ss.getSheetByName("Parts_Installation");
+      if (pSheet && pSheet.getLastRow() > 1) {
+        const pRows = pSheet.getDataRange().getValues();
+        const pH = pRows[0].map(h => String(h).trim());
+        const pi = (n) => pH.indexOf(n);
+        const activeMachines = [];
+        const activeRows = [];
+        for (let i = 1; i < pRows.length; i++) {
+          if (String(pRows[i][pi("Status")] || "").trim() !== "Active") continue;
+          const mac = String(pRows[i][pi("Machine")] || "").trim();
+          if (mac && activeMachines.indexOf(mac) === -1) activeMachines.push(mac);
+          activeRows.push(pRows[i]);
+        }
+        const macShots = activeMachines.length > 0 ? calcMultiMachineShots(ss, activeMachines) : {};
+        activeRows.forEach(r => {
+          const mac = String(r[pi("Machine")] || "").trim();
+          const installShot = parseInt(r[pi("Install_Shot")]) || 0;
+          const carried = parseInt(r[pi("Carried_Shots")]) || 0;
+          const lifeShots = parseInt(r[pi("Life_Shots")]) || 0;
+          const machineShot = macShots[mac] || 0;
+          const actualShots = carried + Math.max(0, machineShot - installShot);
+          const nextCheck = parseInt(r[pi("Next_Check_Shot")]) || 0;
+          const checkCount = parseInt(r[pi("Check_Count")]) || 0;
+          const effectiveLife = lifeShots * (checkCount + 1);
+          const pct = effectiveLife > 0 ? (actualShots / effectiveLife) * 100 : 0;
+          const autoNextCheck = lifeShots > 0 ? lifeShots * (checkCount + 1) : 0;
+          const item = {
+            installId: String(r[pi("Install_ID")] || ""),
+            machine: mac,
+            partId: String(r[pi("Part_ID")] || ""),
+            partName: String(r[pi("Part_Name")] || ""),
+            actualShots: actualShots,
+            lifeShots: lifeShots,
+            effectiveLife: effectiveLife,
+            pct: Math.round(pct * 10) / 10,
+            nextCheckShot: autoNextCheck,
+            checkCount: checkCount
+          };
+          if (autoNextCheck > 0 && actualShots >= autoNextCheck) {
+            result.partsCheck.push(item);
+          } else if (lifeShots > 0 && pct >= 90) {
+            result.partsNearEnd.push(item);
+          }
+        });
+      }
+    } catch (e) { console.error("Inbox parts err: " + e); }
+
+    // 3) งาน Sort รอ QC (Sorting_Data: status = "Wait QC")
+    if (role === "QC" || role === "Admin") {
+      try {
+        const sSheet = ss.getSheetByName("Sorting_Data");
+        if (sSheet && sSheet.getLastRow() > 1) {
+          const sRows = sSheet.getDataRange().getValues();
+          const sH = sRows[0].map(h => String(h).trim());
+          const si = (n) => sH.indexOf(n);
+          for (let i = 1; i < sRows.length; i++) {
+            if (String(sRows[i][si("Status")] || "").trim() !== "Wait QC") continue;
+            let product = String(sRows[i][si("Product")] || "").trim();
+            if (product.includes(" : ")) product = product.split(" : ").slice(1).join(" : ").trim();
+            result.sortingWaitQC.push({
+              jobId: String(sRows[i][si("Job_ID")] || ""),
+              product: product,
+              symptom: String(sRows[i][si("Symptom")] || ""),
+              qty: String(sRows[i][si("Qty")] || ""),
+              sorter: String(sRows[i][si("Sorter")] || ""),
+              fgQty: String(sRows[i][si("FG_Qty")] || ""),
+              ngQty: String(sRows[i][si("NG_Qty")] || "")
+            });
+          }
+        }
+      } catch (e) { console.error("Inbox sort err: " + e); }
+    }
+
+    // 4) แผน PM ที่ถึงกำหนด (Maintenance_Plan: Active + Next_Due_Date <= today + Assigned_To = user)
+    try {
+      const pmSheet = ss.getSheetByName("Maintenance_Plan");
+      if (pmSheet && pmSheet.getLastRow() > 1) {
+        const pmRows = pmSheet.getDataRange().getValues();
+        const pmH = pmRows[0].map(h => String(h).trim());
+        const pi = (n) => pmH.indexOf(n);
+        for (let i = 1; i < pmRows.length; i++) {
+          const status = String(pmRows[i][pi("Status")] || "").trim();
+          if (status !== "Active") continue;
+          const assignedTo = String(pmRows[i][pi("Assigned_To")] || "").trim();
+          if (assignedTo && assignedTo !== userName && role !== "Admin") continue;
+          const dueDateRaw = pmRows[i][pi("Next_Due_Date")];
+          let dueDate = "";
+          if (dueDateRaw instanceof Date) dueDate = Utilities.formatDate(dueDateRaw, "GMT+7", "yyyy-MM-dd");
+          else dueDate = String(dueDateRaw || "").trim().substring(0, 10);
+          if (!dueDate || dueDate > todayISO) continue;
+          const daysOverdue = dueDate ? daysBetween(dueDate, todayISO) : 0;
+          result.pmTasks.push({
+            planId: String(pmRows[i][pi("Plan_ID")] || ""),
+            machine: String(pmRows[i][pi("Machine")] || ""),
+            planType: String(pmRows[i][pi("Plan_Type")] || ""),
+            taskName: String(pmRows[i][pi("Task_Name")] || ""),
+            frequency: String(pmRows[i][pi("Frequency")] || ""),
+            assignedTo: assignedTo,
+            dueDate: dueDate,
+            daysOverdue: daysOverdue,
+            note: String(pmRows[i][pi("Note")] || "")
+          });
+        }
+      }
+    } catch (e) { console.error("Inbox PM err: " + e); }
+
+    const counts = {
+      maintenance: result.maintenance.length,
+      partsCheck: result.partsCheck.length,
+      partsNearEnd: result.partsNearEnd.length,
+      sortingWaitQC: result.sortingWaitQC.length,
+      pmTasks: result.pmTasks.length,
+      total: result.maintenance.length + result.partsCheck.length + result.partsNearEnd.length + result.sortingWaitQC.length + result.pmTasks.length
+    };
+    return ContentService.createTextOutput(JSON.stringify({ status: "success", categories: result, counts: counts })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // === COMPLETE_PM_TASK — ช่างกดทำเสร็จ + แนบรูป ===
+  if (action === "COMPLETE_PM_TASK") {
+    const planId = data.planId;
+    const note = data.note || "";
+    const now = new Date();
+    const doneDate = Utilities.formatDate(now, "GMT+7", "yyyy-MM-dd");
+    const doneBy = data.username || "Unknown";
+
+    let photoUrl = "";
+    if (data.imageBase64) {
+      photoUrl = saveImageToDrive(data.imageBase64, "PM_" + planId + "_" + Utilities.formatDate(now, "GMT+7", "yyyyMMdd_HHmmss") + ".jpg");
+    }
+
+    const pmSheet = ss.getSheetByName("Maintenance_Plan");
+    if (!pmSheet) return ContentService.createTextOutput(JSON.stringify({status: "error", message: "ไม่พบชีท Maintenance_Plan"})).setMimeType(ContentService.MimeType.JSON);
+    const pmRows = pmSheet.getDataRange().getValues();
+    const pmH = pmRows[0].map(h => String(h).trim());
+    const pi = (n) => pmH.indexOf(n);
+    let planRow = -1, machine = "", taskName = "", dueDate = "";
+    for (let i = 1; i < pmRows.length; i++) {
+      if (String(pmRows[i][pi("Plan_ID")] || "").trim() === planId) {
+        planRow = i + 1;
+        machine = String(pmRows[i][pi("Machine")] || "");
+        taskName = String(pmRows[i][pi("Task_Name")] || "");
+        const dd = pmRows[i][pi("Next_Due_Date")];
+        dueDate = (dd instanceof Date) ? Utilities.formatDate(dd, "GMT+7", "yyyy-MM-dd") : String(dd || "").substring(0, 10);
+        break;
+      }
+    }
+    if (planRow === -1) return ContentService.createTextOutput(JSON.stringify({status: "error", message: "ไม่พบแผน " + planId})).setMimeType(ContentService.MimeType.JSON);
+
+    let logSheet = ss.getSheetByName("Maintenance_Log");
+    if (!logSheet) {
+      logSheet = ss.insertSheet("Maintenance_Log");
+      logSheet.appendRow(["Log_ID", "Plan_ID", "Machine", "Task_Name", "Due_Date", "Done_Date", "Done_By", "Status", "Approved_By", "Approved_Date", "Photo_URLs", "Note", "Days_Diff"]);
+    }
+    const logId = "PML-" + Utilities.formatDate(now, "GMT+7", "yyMMddHHmmss") + "-" + Math.random().toString(36).substring(2, 6).toUpperCase();
+    const daysDiff = dueDate ? daysBetween(dueDate, doneDate) : 0;
+    logSheet.appendRow([logId, planId, machine, taskName, dueDate, doneDate, doneBy, "Approved", doneBy, doneDate, photoUrl, note, daysDiff]);
+
+    // อัพเดต Next_Due_Date ใน Maintenance_Plan ทันที
+    const pmH2 = pmRows[0].map(h => String(h).trim());
+    const pi2 = (n) => pmH2.indexOf(n);
+    const freq = String(pmRows[planRow - 1][pi2("Frequency")] || "").trim().toLowerCase();
+    const interval = parseInt(pmRows[planRow - 1][pi2("Interval_Value")]) || 30;
+    const lastDoneCol = pi2("Last_Done_Date") + 1;
+    const nextDueCol = pi2("Next_Due_Date") + 1;
+    if (lastDoneCol > 0) pmSheet.getRange(planRow, lastDoneCol).setValue(doneDate);
+    if (nextDueCol > 0) {
+      let nextDate = new Date(doneDate + "T00:00:00+07:00");
+      if (freq === "daily") nextDate.setDate(nextDate.getDate() + 1);
+      else if (freq === "weekly") nextDate.setDate(nextDate.getDate() + 7);
+      else if (freq === "monthly") nextDate.setMonth(nextDate.getMonth() + 1);
+      else if (freq === "quarterly") nextDate.setMonth(nextDate.getMonth() + 3);
+      else if (freq === "yearly") nextDate.setFullYear(nextDate.getFullYear() + 1);
+      else nextDate.setDate(nextDate.getDate() + interval);
+      pmSheet.getRange(planRow, nextDueCol).setValue(Utilities.formatDate(nextDate, "GMT+7", "yyyy-MM-dd"));
+    }
+    SpreadsheetApp.flush();
+
+    logUserAction(doneBy, data.role || "Production", "COMPLETE_PM_TASK", "แผน " + planId + " เครื่อง " + machine);
+    return ContentService.createTextOutput(JSON.stringify({status: "success", message: "บันทึกเสร็จเรียบร้อย", logId: logId})).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // === APPROVE_PM_TASK — หัวหน้าอนุมัติ ===
+  if (action === "APPROVE_PM_TASK") {
+    const logId = data.logId;
+    const approved = data.approved !== false;
+    const approver = data.username || "Unknown";
+    const now = new Date();
+    const approveDate = Utilities.formatDate(now, "GMT+7", "yyyy-MM-dd");
+
+    const logSheet = ss.getSheetByName("Maintenance_Log");
+    if (!logSheet) return ContentService.createTextOutput(JSON.stringify({status: "error", message: "ไม่พบชีท Maintenance_Log"})).setMimeType(ContentService.MimeType.JSON);
+    const logRows = logSheet.getDataRange().getValues();
+    const lH = logRows[0].map(h => String(h).trim());
+    const li = (n) => lH.indexOf(n);
+    let logRow = -1, planId = "";
+    for (let i = 1; i < logRows.length; i++) {
+      if (String(logRows[i][li("Log_ID")] || "").trim() === logId) {
+        logRow = i + 1;
+        planId = String(logRows[i][li("Plan_ID")] || "");
+        break;
+      }
+    }
+    if (logRow === -1) return ContentService.createTextOutput(JSON.stringify({status: "error", message: "ไม่พบ Log " + logId})).setMimeType(ContentService.MimeType.JSON);
+
+    const statusCol = li("Status") + 1;
+    const approverCol = li("Approved_By") + 1;
+    const appDateCol = li("Approved_Date") + 1;
+    logSheet.getRange(logRow, statusCol).setValue(approved ? "Approved" : "Rejected");
+    if (approverCol > 0) logSheet.getRange(logRow, approverCol).setValue(approver);
+    if (appDateCol > 0) logSheet.getRange(logRow, appDateCol).setValue(approveDate);
+
+    // อัพเดต Next_Due_Date ใน Maintenance_Plan (เฉพาะ Approved)
+    if (approved && planId) {
+      const pmSheet = ss.getSheetByName("Maintenance_Plan");
+      if (pmSheet) {
+        const pmRows = pmSheet.getDataRange().getValues();
+        const pmH = pmRows[0].map(h => String(h).trim());
+        const pi = (n) => pmH.indexOf(n);
+        for (let i = 1; i < pmRows.length; i++) {
+          if (String(pmRows[i][pi("Plan_ID")] || "").trim() === planId) {
+            const freq = String(pmRows[i][pi("Frequency")] || "").trim().toLowerCase();
+            const interval = parseInt(pmRows[i][pi("Interval_Value")]) || 30;
+            const lastDoneCol = pi("Last_Done_Date") + 1;
+            const nextDueCol = pi("Next_Due_Date") + 1;
+            if (lastDoneCol > 0) pmSheet.getRange(i + 1, lastDoneCol).setValue(approveDate);
+            if (nextDueCol > 0) {
+              let nextDate = new Date(approveDate + "T00:00:00+07:00");
+              if (freq === "daily") nextDate.setDate(nextDate.getDate() + 1);
+              else if (freq === "weekly") nextDate.setDate(nextDate.getDate() + 7);
+              else if (freq === "monthly") nextDate.setMonth(nextDate.getMonth() + 1);
+              else if (freq === "quarterly") nextDate.setMonth(nextDate.getMonth() + 3);
+              else if (freq === "yearly") nextDate.setFullYear(nextDate.getFullYear() + 1);
+              else nextDate.setDate(nextDate.getDate() + interval);
+              pmSheet.getRange(i + 1, nextDueCol).setValue(Utilities.formatDate(nextDate, "GMT+7", "yyyy-MM-dd"));
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    SpreadsheetApp.flush();
+    logUserAction(approver, data.role || "Admin", "APPROVE_PM_TASK", (approved ? "อนุมัติ" : "ปฏิเสธ") + " Log " + logId);
+    return ContentService.createTextOutput(JSON.stringify({status: "success", message: approved ? "อนุมัติแล้ว" : "ปฏิเสธแล้ว"})).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // === GET_PM_SUMMARY — ข้อมูลสำหรับ Gantt Chart ===
+  if (action === "GET_PM_SUMMARY") {
+    const plans = [];
+    const logs = [];
+    try {
+      const pmSheet = ss.getSheetByName("Maintenance_Plan");
+      if (pmSheet && pmSheet.getLastRow() > 1) {
+        const pmRows = pmSheet.getDataRange().getValues();
+        const pmH = pmRows[0].map(h => String(h).trim());
+        const pi = (n) => pmH.indexOf(n);
+        for (let i = 1; i < pmRows.length; i++) {
+          if (String(pmRows[i][pi("Status")] || "").trim() !== "Active") continue;
+          const dd = pmRows[i][pi("Next_Due_Date")];
+          const ld = pmRows[i][pi("Last_Done_Date")];
+          plans.push({
+            planId: String(pmRows[i][pi("Plan_ID")] || ""),
+            machine: String(pmRows[i][pi("Machine")] || ""),
+            planType: String(pmRows[i][pi("Plan_Type")] || ""),
+            taskName: String(pmRows[i][pi("Task_Name")] || ""),
+            frequency: String(pmRows[i][pi("Frequency")] || ""),
+            intervalValue: parseInt(pmRows[i][pi("Interval_Value")]) || 0,
+            assignedTo: String(pmRows[i][pi("Assigned_To")] || ""),
+            nextDueDate: (dd instanceof Date) ? Utilities.formatDate(dd, "GMT+7", "yyyy-MM-dd") : String(dd || "").substring(0, 10),
+            lastDoneDate: (ld instanceof Date) ? Utilities.formatDate(ld, "GMT+7", "yyyy-MM-dd") : String(ld || "").substring(0, 10)
+          });
+        }
+      }
+    } catch (e) { console.error("PM summary plans err: " + e); }
+    try {
+      const logSheet = ss.getSheetByName("Maintenance_Log");
+      if (logSheet && logSheet.getLastRow() > 1) {
+        const logRows = logSheet.getDataRange().getValues();
+        const lH = logRows[0].map(h => String(h).trim());
+        const li = (n) => lH.indexOf(n);
+        for (let i = 1; i < logRows.length; i++) {
+          const dd = logRows[i][li("Due_Date")];
+          const done = logRows[i][li("Done_Date")];
+          logs.push({
+            logId: String(logRows[i][li("Log_ID")] || ""),
+            planId: String(logRows[i][li("Plan_ID")] || ""),
+            machine: String(logRows[i][li("Machine")] || ""),
+            taskName: String(logRows[i][li("Task_Name")] || ""),
+            dueDate: (dd instanceof Date) ? Utilities.formatDate(dd, "GMT+7", "yyyy-MM-dd") : String(dd || "").substring(0, 10),
+            doneDate: (done instanceof Date) ? Utilities.formatDate(done, "GMT+7", "yyyy-MM-dd") : String(done || "").substring(0, 10),
+            doneBy: String(logRows[i][li("Done_By")] || ""),
+            status: String(logRows[i][li("Status")] || ""),
+            daysDiff: parseInt(logRows[i][li("Days_Diff")]) || 0
+          });
+        }
+      }
+    } catch (e) { console.error("PM summary logs err: " + e); }
+
+    // คำนวณสถิติ
+    const approved = logs.filter(l => l.status === "Approved");
+    const onTime = approved.filter(l => l.daysDiff <= 0).length;
+    const late = approved.filter(l => l.daysDiff > 0).length;
+    const overdue = plans.filter(p => p.nextDueDate && p.nextDueDate <= Utilities.formatDate(new Date(), "GMT+7", "yyyy-MM-dd")).length;
+    const avgLateDays = late > 0 ? Math.round(approved.filter(l => l.daysDiff > 0).reduce((s, l) => s + l.daysDiff, 0) / late * 10) / 10 : 0;
+
+    return ContentService.createTextOutput(JSON.stringify({
+      status: "success", plans: plans, logs: logs,
+      stats: { total: approved.length, onTime: onTime, late: late, overdue: overdue, avgLateDays: avgLateDays, adherencePct: approved.length > 0 ? Math.round(onTime / approved.length * 1000) / 10 : 100 }
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // ===================== Force Refresh =====================
+
+  if (action === "SET_FORCE_REFRESH") {
+    try {
+      let sheet = ss.getSheetByName("Config");
+      if (!sheet) { sheet = ss.insertSheet("Config"); sheet.appendRow(["Key", "Value"]); }
+      const rows = sheet.getDataRange().getValues();
+      let found = false;
+      const ver = String(Date.now());
+      for (let i = 1; i < rows.length; i++) {
+        if (String(rows[i][0]).trim() === "force_refresh") {
+          sheet.getRange(i + 1, 2).setValue(ver);
+          found = true; break;
+        }
+      }
+      if (!found) sheet.appendRow(["force_refresh", ver]);
+      logUserAction(data.adminUsername || "Admin", "Admin", "FORCE_REFRESH", "บังคับ refresh ทุก user");
+      return ContentService.createTextOutput(JSON.stringify({ success: true, version: ver })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ success: false, message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  if (action === "CHECK_REFRESH") {
+    try {
+      const sheet = ss.getSheetByName("Config");
+      if (!sheet) return ContentService.createTextOutput(JSON.stringify({ success: true, version: "0" })).setMimeType(ContentService.MimeType.JSON);
+      const rows = sheet.getDataRange().getValues();
+      let ver = "0";
+      for (let i = 1; i < rows.length; i++) {
+        if (String(rows[i][0]).trim() === "force_refresh") { ver = String(rows[i][1] || "0"); break; }
+      }
+      return ContentService.createTextOutput(JSON.stringify({ success: true, version: ver })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ success: true, version: "0" })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  // ===================== Cost Management =====================
+
+  if (action === "GET_COST_DATA") {
+    try {
+      const sheet = ss.getSheetByName("Cost_Data");
+      if (!sheet || sheet.getLastRow() <= 1) {
+        return ContentService.createTextOutput(JSON.stringify({ status: "success", data: [] })).setMimeType(ContentService.MimeType.JSON);
+      }
+      const rows = sheet.getDataRange().getValues();
+      const headers = rows[0].map(h => String(h || "").trim());
+      const result = [];
+      for (let i = 1; i < rows.length; i++) {
+        const obj = {};
+        headers.forEach((h, j) => { obj[h] = rows[i][j]; });
+        result.push(obj);
+      }
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", data: result })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  if (action === "SAVE_COST_DATA") {
+    try {
+      let sheet = ss.getSheetByName("Cost_Data");
+      const costHeaders = ["Month","Sale","RM","Sub_Con","DL","OT","DL_Sup","OT_Sup","Utilities","Subcontract","Accessories","Repair","Other_OH","OH_FC","Transportation","Staff_Admin","Selling_Other","Admin_Other","Other_Income","Bonus_Admin","Bonus_OH","Mgt_Bonus","Extra","Interest","Tax","Depre","Updated_By","Updated_At"];
+      if (!sheet) {
+        sheet = ss.insertSheet("Cost_Data");
+        sheet.appendRow(costHeaders);
+      }
+      const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+      const getCol = (name) => headers.findIndex(h => h === name);
+      const monthCol = getCol("Month");
+      if (monthCol === -1) {
+        return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "Column 'Month' not found" })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      const monthVal = String(data.month || "").trim();
+      if (!monthVal) {
+        return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "Month is required" })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      let targetRow = -1;
+      if (sheet.getLastRow() > 1) {
+        const monthData = sheet.getRange(2, monthCol + 1, sheet.getLastRow() - 1, 1).getValues();
+        for (let i = 0; i < monthData.length; i++) {
+          if (String(monthData[i][0]).trim() === monthVal) { targetRow = i + 2; break; }
+        }
+      }
+
+      const now = new Date();
+      const rowData = {};
+      costHeaders.forEach(h => { rowData[h] = ""; });
+      rowData["Month"] = monthVal;
+      rowData["Updated_By"] = data.updatedBy || "";
+      rowData["Updated_At"] = Utilities.formatDate(now, "GMT+7", "yyyy-MM-dd HH:mm:ss");
+
+      const numFields = ["Sale","RM","Sub_Con","DL","OT","DL_Sup","OT_Sup","Utilities","Subcontract","Accessories","Repair","Other_OH","OH_FC","Transportation","Staff_Admin","Selling_Other","Admin_Other","Other_Income","Bonus_Admin","Bonus_OH","Mgt_Bonus","Extra","Interest","Tax","Depre"];
+      numFields.forEach(f => { rowData[f] = parseFloat(data[f]) || 0; });
+
+      if (targetRow > 0) {
+        const newRow = headers.map(h => rowData[h] !== undefined ? rowData[h] : "");
+        sheet.getRange(targetRow, 1, 1, newRow.length).setValues([newRow]);
+      } else {
+        const newRow = headers.map(h => rowData[h] !== undefined ? rowData[h] : "");
+        sheet.appendRow(newRow);
+      }
+
+      logUserAction(data.updatedBy || "Admin", "Admin", "SAVE_COST_DATA", "บันทึกต้นทุนเดือน " + monthVal);
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", message: "Saved" })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  if (action === "DELETE_COST_DATA") {
+    try {
+      const sheet = ss.getSheetByName("Cost_Data");
+      if (!sheet) return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "Sheet not found" })).setMimeType(ContentService.MimeType.JSON);
+      const monthVal = String(data.month || "").trim();
+      const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+      const monthCol = headers.indexOf("Month");
+      if (monthCol === -1 || !monthVal) return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "Invalid" })).setMimeType(ContentService.MimeType.JSON);
+      const monthData = sheet.getRange(2, monthCol + 1, sheet.getLastRow() - 1, 1).getValues();
+      for (let i = monthData.length - 1; i >= 0; i--) {
+        if (String(monthData[i][0]).trim() === monthVal) { sheet.deleteRow(i + 2); break; }
+      }
+      return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  // ===================== DL Staff Management =====================
+
+  if (action === "GET_DL_STAFF") {
+    try {
+      const sheet = ss.getSheetByName("DL_Staff");
+      if (!sheet || sheet.getLastRow() <= 1) {
+        return ContentService.createTextOutput(JSON.stringify({ status: "success", data: [] })).setMimeType(ContentService.MimeType.JSON);
+      }
+      const rows = sheet.getDataRange().getValues();
+      const headers = rows[0].map(h => String(h || "").trim());
+      const result = [];
+      for (let i = 1; i < rows.length; i++) {
+        const obj = {};
+        headers.forEach((h, j) => { obj[h] = rows[i][j]; });
+        obj._row = i + 1;
+        result.push(obj);
+      }
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", data: result })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  if (action === "SAVE_DL_STAFF") {
+    try {
+      const dlHeaders = ["Name","Position","Count","Salary","Category","Active"];
+      let sheet = ss.getSheetByName("DL_Staff");
+      if (!sheet) {
+        sheet = ss.insertSheet("DL_Staff");
+        sheet.appendRow(dlHeaders);
+      }
+      const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
+      const getCol = (name) => headers.findIndex(h => h === name);
+
+      const items = data.items || [];
+      if (sheet.getLastRow() > 1) {
+        sheet.deleteRows(2, sheet.getLastRow() - 1);
+      }
+      items.forEach(item => {
+        const row = headers.map(h => {
+          if (h === "Name") return String(item.name || "").trim();
+          if (h === "Position") return String(item.position || "").trim();
+          if (h === "Count") return parseInt(item.count) || 0;
+          if (h === "Salary") return parseFloat(item.salary) || 0;
+          if (h === "Category") return String(item.category || "DL").trim();
+          if (h === "Active") return item.active !== false ? "Yes" : "No";
+          return "";
+        });
+        sheet.appendRow(row);
+      });
+
+      logUserAction(data.updatedBy || "Admin", "Admin", "SAVE_DL_STAFF", "บันทึกข้อมูลพนักงาน DL " + items.length + " รายการ");
+      return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  // ===================== NG Duplicate Check =====================
+
+  if (action === "CHECK_NG_DUPLICATE") {
+    try {
+      const sheet = ss.getSheetByName("Production_Data");
+      if (!sheet || sheet.getLastRow() <= 1) {
+        return ContentService.createTextOutput(JSON.stringify({ success: true, duplicates: [] })).setMimeType(ContentService.MimeType.JSON);
+      }
+      const rows = sheet.getDataRange().getValues();
+      const headers = rows[0].map(h => String(h || "").trim());
+      const getCol = (name) => headers.findIndex(h => h.toLowerCase() === name.toLowerCase());
+      const dateCol = getCol("Date");
+      const machineCol = getCol("Machine");
+      const hourCol = getCol("Hour");
+      const ngKgCol = getCol("NG_Total");
+      const ngJsonCol = getCol("NG_Details_JSON");
+
+      const checkDate = String(data.date || "").trim();
+      const checkItems = data.items || [];
+      if (!checkDate || checkItems.length === 0) {
+        return ContentService.createTextOutput(JSON.stringify({ success: true, duplicates: [] })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      const existingRows = [];
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        const rowDate = (dateCol !== -1 && row[dateCol] instanceof Date) ?
+          Utilities.formatDate(row[dateCol], "GMT+7", "yyyy-MM-dd") :
+          (dateCol !== -1 ? String(row[dateCol] || "").substring(0, 10) : "");
+        if (rowDate !== checkDate) continue;
+        const ngKg = parseFloat(row[ngKgCol]) || 0;
+        if (ngKg <= 0) continue;
+
+        let symptoms = [];
+        if (ngJsonCol !== -1) {
+          try { symptoms = JSON.parse(String(row[ngJsonCol] || "[]")); } catch(e) {}
+        }
+
+        existingRows.push({
+          machine: machineCol !== -1 ? String(row[machineCol] || "").trim() : "",
+          hour: hourCol !== -1 ? String(row[hourCol] || "").trim() : "",
+          ngKg: ngKg,
+          symptoms: symptoms
+        });
+      }
+
+      const duplicates = [];
+      const checkHour = String(data.hour || "").trim();
+
+      checkItems.forEach(item => {
+        const itemMachine = String(item.machine || "").trim();
+        const itemNgDetails = item.ngDetails || [];
+        if (itemNgDetails.length === 0) return;
+
+        itemNgDetails.forEach(ng => {
+          const ngType = String(ng.type || "").trim().toLowerCase();
+          const ngQty = parseFloat(ng.qty) || 0;
+          if (ngQty <= 0) return;
+
+          existingRows.forEach(ex => {
+            if (ex.machine !== itemMachine) return;
+            if (checkHour && ex.hour !== checkHour) return;
+            ex.symptoms.forEach(s => {
+              const exType = String(s.type || s.symptom || "").trim().toLowerCase();
+              const exQty = parseFloat(s.qty) || 0;
+              if (exType === ngType && Math.abs(exQty - ngQty) < 0.001) {
+                duplicates.push({
+                  machine: itemMachine,
+                  hour: ex.hour,
+                  symptom: ng.type,
+                  qty: ngQty
+                });
+              }
+            });
+          });
+        });
+      });
+
+      return ContentService.createTextOutput(JSON.stringify({ success: true, duplicates: duplicates })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ success: true, duplicates: [] })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  // ===================== Sorting by Timestamp (สำหรับ reconcile สต๊อก) =====================
+
+  if (action === "GET_PRODUCTION_BY_TIMESTAMP") {
+    try {
+      const sheet = ss.getSheetByName("Production_Data");
+      if (!sheet || sheet.getLastRow() <= 1) {
+        return ContentService.createTextOutput(JSON.stringify({ success: true, data: [], totals: { fg: 0, ngPcs: 0, ngKg: 0, rows: 0 } })).setMimeType(ContentService.MimeType.JSON);
+      }
+      const rows = sheet.getDataRange().getValues();
+      const headers = rows[0].map(h => String(h || "").trim());
+      const getCol = (name) => headers.findIndex(h => h.toLowerCase() === name.toLowerCase());
+      const timestampCol = getCol("Timestamp");
+      const batchIdCol = getCol("Batch_ID");
+      const productCol = getCol("Product");
+      const fgCol = getCol("FG");
+      const ngKgCol = getCol("NG_Total");
+      const dateCol = getCol("Date");
+      const shiftCol = getCol("Shift");
+      const machineCol = getCol("Machine");
+      const hourCol = getCol("Hour");
+      const recorderCol = getCol("Recorder");
+      const ngJsonCol = getCol("NG_Details_JSON");
+
+      if (timestampCol === -1) {
+        return ContentService.createTextOutput(JSON.stringify({ success: true, data: [], totals: { fg: 0, ngPcs: 0, ngKg: 0, rows: 0 } })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      const start = String(data.start || "").trim();
+      const end = String(data.end || "").trim();
+      const filterType = String(data.filter || "all").trim();
+
+      const toCalendarDate = (rawVal) => {
+        if (!rawVal) return "";
+        if (rawVal instanceof Date && !isNaN(rawVal.getTime())) {
+          const formatted = Utilities.formatDate(rawVal, "GMT+7", "yyyy-MM-dd");
+          const y = parseInt(formatted.substring(0, 4)) || 0;
+          if (y > 2500) return (y - 543) + formatted.substring(4);
+          return formatted;
+        }
+        const text = String(rawVal).trim();
+        if (/^\d{4}-\d{2}-\d{2}/.test(text)) {
+          const y = parseInt(text.substring(0, 4)) || 0;
+          if (y > 2500) return (y - 543) + text.substring(4, 10);
+          return text.substring(0, 10);
+        }
+        const datePart = text.split(/[\s,]+/)[0] || "";
+        if (datePart.includes("/")) {
+          const dp = datePart.split("/");
+          if (dp.length === 3) {
+            let year = parseInt(dp[2]) || 0;
+            if (year > 2500) year -= 543;
+            return year + "-" + String(parseInt(dp[1]) || 1).padStart(2, "0") + "-" + String(parseInt(dp[0]) || 1).padStart(2, "0");
+          }
+        }
+        return "";
+      };
+
+      const getWppStrict = (productName) => {
+        const p = String(productName || "");
+        if (p.includes("10A")) return 0.00228;
+        if (p.includes("16A")) return 0.00279;
+        if (p.includes("20A")) return 0.00357;
+        if (p.includes("25/32A")) return 0.005335;
+        return null;
+      };
+
+      const result = [];
+      let totalFg = 0, totalNgPcs = 0, totalNgKg = 0, totalRows = 0;
+
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        const batchId = (batchIdCol !== -1) ? String(row[batchIdCol] || "").trim() : "";
+        const isSorting = batchId.indexOf("SORT-") === 0;
+
+        if (filterType === "sorting" && !isSorting) continue;
+        if (filterType === "production" && isSorting) continue;
+
+        const tsDateISO = toCalendarDate(row[timestampCol]);
+        if (!tsDateISO) continue;
+        if (start && tsDateISO < start) continue;
+        if (end && tsDateISO > end) continue;
+
+        const model = String(row[productCol] || "").trim();
+        const wpp = getWppStrict(model);
+        const fg = parseFloat(row[fgCol]) || 0;
+        const ngKg = parseFloat(row[ngKgCol]) || 0;
+
+        if (filterType === "fg_only" && ngKg > 0) continue;
+        if (filterType === "ng_only" && ngKg <= 0) continue;
+        const ngPcs = (ngKg > 0 && wpp) ? Math.round(ngKg / wpp) : 0;
+        const prodDate = (dateCol !== -1 && row[dateCol] instanceof Date) ?
+          Utilities.formatDate(row[dateCol], "GMT+7", "yyyy-MM-dd") :
+          (dateCol !== -1 ? String(row[dateCol] || "").substring(0, 10) : "");
+
+        let tsTime = "";
+        const tsRaw = row[timestampCol];
+        if (tsRaw instanceof Date && !isNaN(tsRaw.getTime())) {
+          tsTime = Utilities.formatDate(tsRaw, "GMT+7", "HH:mm:ss");
+        } else {
+          const m = String(tsRaw || "").match(/(\d{1,2}:\d{2}(:\d{2})?)/);
+          if (m) tsTime = m[1];
+        }
+
+        result.push({
+          type: isSorting ? "Sorting" : "FG",
+          batchId: batchId,
+          tsDate: tsDateISO,
+          tsTime: tsTime,
+          prodDate: prodDate,
+          model: model,
+          machine: machineCol !== -1 ? String(row[machineCol] || "") : "",
+          shift: shiftCol !== -1 ? String(row[shiftCol] || "") : "",
+          hour: hourCol !== -1 ? String(row[hourCol] || "") : "",
+          recorder: recorderCol !== -1 ? String(row[recorderCol] || "") : "",
+          fg: fg,
+          ngKg: ngKg,
+          ngPcs: ngPcs,
+          ngSymptom: ""
+        });
+        if (ngKg > 0 && ngJsonCol !== -1) {
+          try {
+            const details = JSON.parse(String(row[ngJsonCol] || "[]"));
+            result[result.length - 1].ngSymptom = details.map(d => d.type || d.symptom || "").filter(Boolean).join(", ");
+          } catch(e) {}
+        }
+        totalFg += fg;
+        totalRows++;
+      }
+
+      return ContentService.createTextOutput(JSON.stringify({
+        success: true, data: result, totals: { fg: totalFg, ngPcs: totalNgPcs, ngKg: Math.round(totalNgKg * 10000) / 10000, rows: totalRows }
+      })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ success: false, message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  if (action === "UNINSTALL_PART") {
+    try {
+      var instId = data.installId;
+      if (!instId) throw new Error("Missing installId");
+      var sheet = ss.getSheetByName("Parts_Installation");
+      if (!sheet) throw new Error("Parts_Installation sheet not found");
+      var rows = sheet.getDataRange().getValues();
+      var headers = rows[0].map(function(h) { return String(h).trim(); });
+      var colIdx = function(name) { return headers.indexOf(name); };
+      var found = false;
+      for (var i = 1; i < rows.length; i++) {
+        if (String(rows[i][colIdx("Install_ID")]).trim() === instId) {
+          if (String(rows[i][colIdx("Status")]).trim() !== "Active") {
+            throw new Error("อะไหล่นี้ไม่ได้อยู่ในสถานะ Active");
+          }
+          var now = new Date();
+          var todayStr = Utilities.formatDate(now, "GMT+7", "yyyy-MM-dd");
+          sheet.getRange(i + 1, colIdx("Status") + 1).setValue("Removed");
+          sheet.getRange(i + 1, colIdx("Replaced_Date") + 1).setValue(todayStr);
+          SpreadsheetApp.flush();
+          found = true;
+          break;
+        }
+      }
+      if (!found) throw new Error("ไม่พบ Install_ID: " + instId);
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", message: "Uninstalled" })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
   return ContentService.createTextOutput(JSON.stringify({status: "error", message: "Unknown Action"})).setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -1667,6 +3003,82 @@ function getWeightPerPc(productName) {
 function getPcsFromKg(productName, kg) {
     if (!kg || kg <= 0) return 0;
     return Math.round(kg / getWeightPerPc(productName));
+}
+
+// คำนวณจำนวนวันระหว่างวันที่ 2 ตัว (inclusive, format "yyyy-MM-dd")
+function daysBetween(startStr, endStr) {
+  if (!startStr || !endStr) return 0;
+  try {
+    var s = new Date(startStr + "T00:00:00+07:00");
+    var e = new Date(endStr + "T00:00:00+07:00");
+    if (isNaN(s.getTime()) || isNaN(e.getTime())) return 0;
+    var diffMs = e.getTime() - s.getTime();
+    return Math.max(0, Math.round(diffMs / 86400000));
+  } catch (err) {
+    return 0;
+  }
+}
+
+// คำนวณ Shot สะสมของเครื่อง (FG + NG pcs) ตั้งแต่วันที่ระบุ
+// sinceDate / upToDate: "yyyy-MM-dd" (inclusive ทั้งคู่)
+function calcMachineShots(ss, machine, sinceDate, upToDate) {
+  sinceDate = sinceDate || "2020-01-01";
+  upToDate = upToDate || "";
+  let totalShots = 0;
+  const prodSheet = ss.getSheetByName("Production_Data");
+  if (!prodSheet || prodSheet.getLastRow() <= 1) return 0;
+  const pRows = prodSheet.getDataRange().getValues();
+  const pH = pRows[0].map(function(h) { return String(h).trim().toLowerCase(); });
+  const pDateIdx = pH.indexOf("date");
+  const pMachIdx = pH.indexOf("machine");
+  const pFgIdx = pH.indexOf("fg");
+  const pNgIdx = pH.indexOf("ng_total");
+  const pProdIdx = pH.indexOf("product");
+  if (pDateIdx === -1 || pMachIdx === -1 || pFgIdx === -1) return 0;
+  for (var i = 1; i < pRows.length; i++) {
+    var pMach = String(pRows[i][pMachIdx] || "").trim();
+    if (pMach !== machine) continue;
+    var pDateRaw = pRows[i][pDateIdx];
+    var pDateStr = "";
+    if (pDateRaw instanceof Date && !isNaN(pDateRaw.getTime())) {
+      pDateStr = Utilities.formatDate(pDateRaw, "GMT+7", "yyyy-MM-dd");
+    } else {
+      pDateStr = String(pDateRaw || "").trim().substring(0, 10);
+    }
+    if (pDateStr < sinceDate) continue;
+    if (upToDate && pDateStr > upToDate) continue;
+    var fg = parseInt(pRows[i][pFgIdx]) || 0;
+    var ngKg = parseFloat(pRows[i][pNgIdx]) || 0;
+    var prod = String(pRows[i][pProdIdx] || "");
+    var ngPcs = getPcsFromKg(prod, ngKg);
+    totalShots += (fg + ngPcs);
+  }
+  return totalShots;
+}
+
+// คำนวณ Shot สะสมของหลายเครื่องพร้อมกัน (อ่าน Production_Data ครั้งเดียว)
+function calcMultiMachineShots(ss, machineList) {
+  var result = {};
+  machineList.forEach(function(m) { result[m] = 0; });
+  var prodSheet = ss.getSheetByName("Production_Data");
+  if (!prodSheet || prodSheet.getLastRow() <= 1) return result;
+  var pRows = prodSheet.getDataRange().getValues();
+  var pH = pRows[0].map(function(h) { return String(h).trim().toLowerCase(); });
+  var pMachIdx = pH.indexOf("machine");
+  var pFgIdx = pH.indexOf("fg");
+  var pNgIdx = pH.indexOf("ng_total");
+  var pProdIdx = pH.indexOf("product");
+  if (pMachIdx === -1 || pFgIdx === -1) return result;
+  for (var i = 1; i < pRows.length; i++) {
+    var mac = String(pRows[i][pMachIdx] || "").trim();
+    if (result[mac] === undefined) continue;
+    var fg = parseInt(pRows[i][pFgIdx]) || 0;
+    var ngKg = parseFloat(pRows[i][pNgIdx]) || 0;
+    var prod = String(pRows[i][pProdIdx] || "");
+    var ngPcs = getPcsFromKg(prod, ngKg);
+    result[mac] += (fg + ngPcs);
+  }
+  return result;
 }
 
 function getUniqueOptionsFromHistory() {
@@ -2041,28 +3453,16 @@ function getAdvancedDashboardData(reqStart, reqEnd, reqShift, reqType) {
         if (!sDateRaw) continue;
         let sDateStr = "";
         if (sDateRaw instanceof Date && !isNaN(sDateRaw.getTime())) {
-          // ตัดวัน 08:00 — ก่อน 08:00 นับเป็นวันก่อนหน้า
-          let shiftDate = new Date(sDateRaw.getTime());
-          let hourCheck = parseInt(Utilities.formatDate(shiftDate, "GMT+7", "HH")) || 0;
-          if (hourCheck < 8) {
-            shiftDate.setDate(shiftDate.getDate() - 1);
-          }
-          let yyyy = parseInt(Utilities.formatDate(shiftDate, "GMT+7", "yyyy"));
+          // Sorting_Data วันที่ถูก lock ไว้ถูกต้องแล้วจาก frontend — ไม่ต้องตัดวัน 08:00 ซ้ำ
+          let yyyy = parseInt(Utilities.formatDate(sDateRaw, "GMT+7", "yyyy"));
           if (yyyy > 2500) yyyy -= 543;
-          sDateStr = yyyy + "-" + Utilities.formatDate(shiftDate, "GMT+7", "MM") + "-" + Utilities.formatDate(shiftDate, "GMT+7", "dd");
+          sDateStr = yyyy + "-" + Utilities.formatDate(sDateRaw, "GMT+7", "MM") + "-" + Utilities.formatDate(sDateRaw, "GMT+7", "dd");
         } else {
-          // string format: "2026-04-06 02:30" or "2026-04-06"
           const sDateParts = String(sDateRaw).trim().split(" ");
           sDateStr = sDateParts[0].substring(0, 10);
-          // ถ้ามี time component → ตัดวัน 08:00
-          if (sDateParts[1]) {
-            const sHour = parseInt(sDateParts[1].split(":")[0]) || 0;
-            if (sHour < 8) {
-              const tmpDate = new Date(sDateStr + "T00:00:00");
-              tmpDate.setDate(tmpDate.getDate() - 1);
-              sDateStr = tmpDate.getFullYear() + "-" + String(tmpDate.getMonth() + 1).padStart(2, '0') + "-" + String(tmpDate.getDate()).padStart(2, '0');
-            }
-          }
+          // แปลง พ.ศ. ถ้ามี
+          const sYear = parseInt(sDateStr.substring(0, 4)) || 0;
+          if (sYear > 2500) sDateStr = (sYear - 543) + sDateStr.substring(4);
         }
 
         if (sDateStr < startDate || sDateStr > endDate) continue;
@@ -2311,6 +3711,6 @@ function debugSheetData() {
           row: i + 1, date: dateStr, shift: shift, type: type, fg: row[col["fg"]], ng: row[col["ng_total"]], isMatchToday: dateStr === today
       });
   }
-  
+
   return { status: "DEBUG_V3.55_Auth", summary: stats, last10Rows: detailedAnalysis };
 }
