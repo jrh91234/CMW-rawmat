@@ -784,6 +784,36 @@ function doPost(e) {
     }
   }
 
+  // --- Raw Material OCR: สกัดข้อมูลจากรูปฉลากวัตถุดิบ ---
+  if (action === "batch_ocr") {
+    try {
+      const images = data.images || [];
+      if (images.length === 0) {
+        return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "No images provided" })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      const props = PropertiesService.getScriptProperties();
+      const apiKey = props.getProperty("GEMINI_API_KEY");
+      if (!apiKey) {
+        return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "GEMINI_API_KEY not configured in Script Properties" })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      const results = images.map(function(imgData) {
+        try {
+          const extracted = callGeminiForOcrData(imgData.image, imgData.mimeType || "image/jpeg", apiKey);
+          return { id: imgData.id, status: "success", data: extracted };
+        } catch (e) {
+          console.error("OCR error for id=" + imgData.id + ": " + e.toString());
+          return { id: imgData.id, status: "error", error: e.toString() };
+        }
+      });
+
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", results: results })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
   if (action === "batch_save") {
     const lock = LockService.getScriptLock();
     try {
@@ -3809,6 +3839,53 @@ function getAdvancedDashboardData(reqStart, reqEnd, reqShift, reqType) {
   }
 
   return result;
+}
+
+// ==================================================
+// 🌟 Gemini Vision OCR สำหรับสกัดข้อมูลจากฉลากวัตถุดิบ
+// ==================================================
+function callGeminiForOcrData(base64Image, mimeType, apiKey) {
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + apiKey;
+
+  const prompt = [
+    "อ่านข้อมูลจากฉลากวัตถุดิบในรูปนี้และตอบกลับเป็น JSON object เท่านั้น (ไม่ต้องมีข้อความอื่น)",
+    "JSON ต้องมีฟิลด์เหล่านี้:",
+    "- part: Part Number / Part No (รหัสชิ้นส่วน)",
+    "- lot: Lot Number / Lot No (หมายเลข Lot)",
+    "- weight: Net Weight / น้ำหนักสุทธิ (ตัวเลขพร้อมหน่วย เช่น 25.5 kg)",
+    "- reel: Reel Number / Reel No (หมายเลขม้วน)",
+    "- date: วันที่ผลิต (MFG Date / Manufacturing Date / Production Date รูปแบบ DD/MM/YYYY)",
+    "ถ้าไม่พบค่าใด ให้ใส่ค่าว่าง string เปล่า"
+  ].join("\n");
+
+  const payload = {
+    contents: [{
+      parts: [
+        { inlineData: { mimeType: mimeType, data: base64Image } },
+        { text: prompt }
+      ]
+    }],
+    generationConfig: { temperature: 0.1 }
+  };
+
+  const response = UrlFetchApp.fetch(url, {
+    method: "POST",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  });
+
+  const responseText = response.getContentText();
+  const responseJson = JSON.parse(responseText);
+
+  if (responseJson.error) {
+    throw new Error("Gemini API error: " + responseJson.error.message);
+  }
+
+  const rawText = responseJson.candidates[0].content.parts[0].text;
+  // ลบ markdown code block ถ้ามี
+  const cleanText = rawText.replace(/```json\s*/gi, "").replace(/```\s*/gi, "").trim();
+  return JSON.parse(cleanText);
 }
 
 function debugSheetData() {
